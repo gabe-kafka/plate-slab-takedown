@@ -33,7 +33,8 @@ def run_engine(dxf_path: Path, mapping: dict, units: str, keep: Path | None = No
         (workspace / "job_config.json").write_text(
             json.dumps({"layers": mapping, "source_units": units}, indent=2), encoding="utf-8"
         )
-        env = {**os.environ, "PYTHONPATH": str(ENGINE_DIR)}
+        # Force UTF-8 so Windows cp1252 consoles do not crash on engine prints.
+        env = {**os.environ, "PYTHONPATH": str(ENGINE_DIR), "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
         logs = []
         for script in ("extract_dxf_data.py", "tributary.py"):
             proc = subprocess.run(

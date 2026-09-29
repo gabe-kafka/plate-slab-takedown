@@ -54,12 +54,20 @@ def detect_revit_version(path: Path) -> int | None:
         import olefile
     except ImportError:
         return None
-    with olefile.OleFileIO(str(path)) as ole:
-        if not ole.exists("BasicFileInfo"):
-            return None
-        raw = ole.openstream("BasicFileInfo").read()
+    try:
+        with olefile.OleFileIO(str(path)) as ole:
+            if not ole.exists("BasicFileInfo"):
+                return None
+            raw = ole.openstream("BasicFileInfo").read()
+    except Exception:
+        # Fake test blobs and corrupt RVTs are not OLE2; treat as unknown.
+        return None
     text = raw.decode("utf-16-le", errors="ignore") + raw.decode("latin-1", errors="ignore")
-    match = re.search(r"Format:\s*(20\d\d)", text) or re.search(r"Autodesk Revit (20\d\d)", text)
+    match = (
+        re.search(r"Format:\s*(20\d\d)", text)
+        or re.search(r"Autodesk Revit (20\d\d)", text)
+        or re.search(r"\b(20\d\d)\d{4}_\d{4}\(x64\)", text)  # e.g. 20260406_1515(x64)
+    )
     return int(match.group(1)) if match else None
 
 

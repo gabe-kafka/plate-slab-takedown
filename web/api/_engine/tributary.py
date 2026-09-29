@@ -913,7 +913,7 @@ for floor_plan in floor_plans:
     floor_idx = floor_plan['index']
     boundary_id = floor_plan['boundary_id']
     floor_number = floor_plan.get('floor_number', boundary_id)
-    print(f"Floor {floor_idx} (boundary_id: {boundary_id}) → Floor Number: {floor_number}")
+    print(f"Floor {floor_idx} (boundary_id: {boundary_id}) -> Floor Number: {floor_number}")
 
 assign_user_datums_to_floor_plans(floor_plans, user_datum_points)
 
@@ -996,7 +996,7 @@ print("\n--- Consolidated Floor Plan Summary ---")
 for floor_plan in floor_plans:
     floor_idx = floor_plan['index']
     floor_number = floor_plan.get('floor_number')
-    print(f"Floor {floor_idx} → Floor Number: {floor_number}")
+    print(f"Floor {floor_idx} -> Floor Number: {floor_number}")
     load_zone_layers = sorted(
         {
             str(zone.get("layer"))
@@ -1219,9 +1219,9 @@ try:
     column_labels = labels_df.to_dict('records')
     print(f"Loaded {len(column_labels)} column labels from dxf_column_labels.csv")
     if label_normalization_summary is not None and not label_normalization_summary.empty:
-        print(f"  Normalized {len(label_normalization_summary)} label(s) to handle alphanumeric variants (e.g., '5a' → '5A').")
+        print(f"  Normalized {len(label_normalization_summary)} label(s) to handle alphanumeric variants (e.g., '5a' -> '5A').")
         for _, row in label_normalization_summary.head(5).iterrows():
-            print(f"    - '{row['raw_label']}' → '{row['label']}'")
+            print(f"    - '{row['raw_label']}' -> '{row['label']}'")
         remaining = len(label_normalization_summary) - min(5, len(label_normalization_summary))
         if remaining > 0:
             print(f"    ... and {remaining} more label(s) normalized")
