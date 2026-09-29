@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" Name="TakedownExport" Version="1.0.0" ProductType="Application" AutodeskProduct="Revit" AppVersion="1.0.0" Description="Exports floors, structural columns, shear-wall candidates and plan DXFs per level for the column load takedown app." Author="conc-slab-tributary-area" ProductCode="{6C1B7B8E-3C5A-4C2E-9E0B-2D1F3A4B5C6D}" UpgradeCode="{0A9F2E4D-7B61-4F0C-8E3A-5D2C1B0A9F8E}">
+  <CompanyDetails Name="conc-slab-tributary-area" />
+  <Components Description="Revit 2026 component">
+    <RuntimeRequirements SeriesMin="R2026" SeriesMax="R2026" Platform="Revit" OS="Win64" />
+    <ComponentEntry AppName="TakedownExport" Version="1.0.0" ModuleName="./Contents/TakedownExport.addin" AppDescription="Takedown export" LoadOnCommandInvocation="False" LoadOnRevitStartup="True" />
+  </Components>
+</ApplicationPackage>
