@@ -11,3 +11,8 @@ web/node_modules/
 web/.next/
 .vercel/
 .vercel
+revit-appbundle/**/bin/
+revit-appbundle/**/obj/
+rvt2dxf-out/
+rvt2dxf-md/
+.pytest_cache/

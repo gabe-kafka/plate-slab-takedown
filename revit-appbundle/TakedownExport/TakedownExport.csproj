@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>TakedownExport</AssemblyName>
+    <RootNamespace>TakedownExport</RootNamespace>
+    <Version>1.0.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reference assemblies only; Design Automation supplies the runtime Revit 2026 engine. -->
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2026.4.10" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Autodesk.Forge.DesignAutomation.Revit" Version="2026.0.0" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

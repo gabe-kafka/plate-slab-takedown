@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import urllib.request
@@ -48,7 +49,20 @@ ROLE_KEYWORDS = {
     "column_label": ["column number", "col no", "column id", "column label", "column"],
     "floor_label": ["floor number", "level", "story", "storey", "floor"],
     "datum": ["datum"],
+    "opening": ["opening", "openings", "shaft opening", "void"],
 }
+
+# Whole-token aliases (layer names split on non-alphanumerics), e.g. NCS/AIA
+# "S-COLS", "COL-IDEN", "S-SLAB-OPNG". Substring matching would let "col" hit
+# unrelated names, so these only score as exact tokens.
+ROLE_TOKENS = {
+    "boundary": ["flor"],
+    "support_point": ["col", "cols"],
+    "column_label": ["iden", "tag", "col", "cols"],
+    "opening": ["opng", "shaft", "hole"],
+}
+
+ROLE_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
 
 
 def inspect_dxf_bytes(payload: bytes, filename: str) -> Dict:
@@ -216,6 +230,10 @@ def _request_ai_layer_suggestions(
                                 "of an elevator/stair core). Used to align floors for "
                                 "cross-floor column-continuity checks."
                             ),
+                            "opening": (
+                                "Closed slab openings (shafts, stair and elevator holes) that are "
+                                "subtracted from the slab. Not column footprints or slab edges."
+                            ),
                         },
                         "layer_metadata": layer_metadata,
                         "deterministic_baseline": fallback_suggestions,
@@ -303,6 +321,7 @@ def _sanitize_ai_suggestions(
                 deduped.append(layer)
         sanitized[role] = deduped[:5]
 
+    _deconflict_opening_suggestions(sanitized)
     boundary_layers = set(sanitized.get("boundary", []))
     additional_load_layers = set(sanitized.get("additional_load", [])) - boundary_layers
     sanitized["additional_load"] = [
@@ -370,6 +389,7 @@ def suggest_layers(layer_counts: Dict[str, Dict[str, int]]) -> Dict[str, List[st
     # Closed slab/load boundaries and wall linework are both polylines. When a
     # layer is selected as a boundary candidate, do not also preselect it as a
     # wall support layer; users can still opt into a wall layer manually.
+    _deconflict_opening_suggestions(suggestions)
     boundary_layers = set(suggestions.get("boundary", []))
     additional_load_layers = set(suggestions.get("additional_load", [])) - boundary_layers
     suggestions["additional_load"] = [
@@ -412,6 +432,17 @@ def suggest_layers(layer_counts: Dict[str, Dict[str, int]]) -> Dict[str, List[st
     _deconflict_datum_suggestions(suggestions)
     _deconflict_label_suggestions(suggestions, layer_counts)
     return suggestions
+
+
+def _deconflict_opening_suggestions(suggestions: Dict[str, List[str]]) -> None:
+    """Openings are subtracted from slabs, so they cannot also be slab/load layers."""
+    opening_layers = set(suggestions.get("opening", []))
+    if not opening_layers:
+        return
+    for role in ("boundary", "additional_load"):
+        suggestions[role] = [
+            layer for layer in suggestions.get(role, []) if layer not in opening_layers
+        ]
 
 
 def _deconflict_datum_suggestions(suggestions: Dict[str, List[str]]) -> None:
@@ -474,6 +505,8 @@ def _score_layer(role: str, layer: str, counts: Dict[str, int], keywords: List[s
     for keyword in keywords:
         if keyword in value:
             score += 10 if keyword == value else 5
+    tokens = set(ROLE_TOKEN_SPLIT.split(value))
+    score += 5 * len(tokens & set(ROLE_TOKENS.get(role, [])))
 
     has_geometry = any(kind in counts for kind in GEOMETRY_TYPES)
     has_text = any(kind in counts for kind in TEXT_TYPES)
@@ -504,6 +537,11 @@ def _score_layer(role: str, layer: str, counts: Dict[str, int], keywords: List[s
         if has_geometry:
             score += 6
         if has_text:
+            score -= 8
+    if role == "opening" and score > 0:
+        if has_geometry:
+            score += 3
+        if counts.get("POINT", 0) or (has_text and not has_geometry):
             score -= 8
     if role in {"column_label", "floor_label"} and has_text:
         score += 4

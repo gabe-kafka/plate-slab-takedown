@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<RevitAddIns>
+  <AddIn Type="DBApplication">
+    <Name>TakedownExport</Name>
+    <FullClassName>TakedownExport.TakedownExportApp</FullClassName>
+    <Assembly>.\TakedownExport.dll</Assembly>
+    <AddInId>8F1D6A42-3B7C-4E59-9A21-6C0D5E4F3B2A</AddInId>
+    <VendorId>TKDN</VendorId>
+    <VendorDescription>conc-slab-tributary-area</VendorDescription>
+  </AddIn>
+</RevitAddIns>

@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { type DemoId, uploadDemo, uploadDxf } from "@/lib/api";
 import { layerMappingFromDraft } from "@/lib/layerMapping";
+import { convertRvt, type RvtProgress } from "@/lib/rvt";
 import type { DraftData } from "@/lib/types";
 
 const DEMO_OPTIONS: { id: DemoId; label: string; filename: string }[] = [
@@ -32,6 +33,8 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
     expired ? "Session expired — please re-upload your DXF." : null,
   );
   const [filename, setFilename] = useState<string | null>(null);
+  const [revitLevels, setRevitLevels] = useState("");
+  const [progress, setProgress] = useState<string | null>(null);
 
   const handleDraft = useCallback(
     (draft: DraftData) => {
@@ -85,15 +88,21 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
 
   const handleFile = useCallback(
     async (file: File) => {
-      if (!file.name.toLowerCase().endsWith(".dxf")) {
-        setError("Upload a .dxf file.");
+      const lower = file.name.toLowerCase();
+      const isRevit = lower.endsWith(".rvt") || lower.endsWith(".zip");
+      if (!lower.endsWith(".dxf") && !isRevit) {
+        setError("Upload a .dxf or Revit .rvt file.");
         return;
       }
       setError(null);
       setFilename(file.name);
       setLoading(true);
+      setProgress(null);
       try {
-        const draft = await uploadDxf(file);
+        const levels = revitLevels.split(",").map((l) => l.trim()).filter(Boolean);
+        const draft = isRevit
+          ? await convertRvt(file, levels, (p) => setProgress(describeRvtProgress(p)))
+          : await uploadDxf(file);
         sessionStorage.removeItem("openedProject");
         handleDraft(draft);
       } catch (e) {
@@ -101,7 +110,7 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
         setLoading(false);
       }
     },
-    [handleDraft],
+    [handleDraft, revitLevels],
   );
 
   const handleDemo = useCallback(async (demo: (typeof DEMO_OPTIONS)[number]) => {
@@ -207,7 +216,7 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
           <input
             ref={fileRef}
             type="file"
-            accept=".dxf"
+            accept=".dxf,.rvt,.zip"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
@@ -216,13 +225,13 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
           />
           {loading ? (
             <div className="space-y-2">
-              <div className="text-accent animate-pulse">Processing...</div>
+              <div className="text-accent animate-pulse">{progress ?? "Processing..."}</div>
               <div className="text-text-muted text-[11px]">{filename}</div>
             </div>
           ) : (
             <div className="space-y-2">
               <div className="text-text-secondary">
-                Drop .dxf file here or click to browse
+                Drop .dxf or Revit .rvt file here or click to browse
               </div>
               {filename && (
                 <div className="text-text-muted text-[11px]">{filename}</div>
@@ -230,6 +239,18 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
             </div>
           )}
         </div>
+
+        <label className="block space-y-1 text-[11px] text-text-muted">
+          <span>Revit levels to extract (optional, comma separated; blank = all)</span>
+          <input
+            type="text"
+            value={revitLevels}
+            onChange={(e) => setRevitLevels(e.target.value)}
+            placeholder="Level 3"
+            disabled={loading}
+            className="w-full px-2 py-1 bg-bg-surface border border-border-panel text-text-primary text-[12px]"
+          />
+        </label>
 
         {error && (
           <div className="text-error text-[12px] bg-error/10 border border-error/20 px-3 py-2">
@@ -266,6 +287,15 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
       </div>
     </div>
   );
+}
+
+function describeRvtProgress(p: RvtProgress): string {
+  if (p.stage === "upload") {
+    const mb = (n: number) => Math.round(n / 2 ** 20).toLocaleString();
+    return `Uploading ${Math.round((100 * p.sentBytes) / p.totalBytes)}% (${mb(p.sentBytes)} / ${mb(p.totalBytes)} MB)`;
+  }
+  if (p.stage === "revit") return `Revit cloud job ${p.state} (${Math.round(p.elapsedS / 60)} min)`;
+  return "Building DXF...";
 }
 
 export default function UploadFlow(props: UploadFlowProps) {

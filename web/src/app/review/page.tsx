@@ -11,6 +11,7 @@ import type { DraftData, LayerMapping } from "@/lib/types";
 const ROLES = [
   { key: "boundary", label: "Boundary", required: true },
   { key: "additional_load", label: "Additional Load", required: false },
+  { key: "opening", label: "Slab Openings", required: false },
   { key: "support_point", label: "Columns / Points", required: true },
   { key: "wall", label: "Walls", required: false },
   { key: "beam", label: "Beams", required: false },
