@@ -138,6 +138,24 @@ def test_cli_run_end_to_end_against_fake_aps(fake, tmp_path, monkeypatch):
     assert payload["limitProcessingTimeSec"] == 3 * 3600
 
 
+def test_web_convert_function_builds_draft(fake, monkeypatch):
+    sys.path.insert(0, str(ROOT / "web" / "api"))
+    import rvt_convert
+
+    bucket = aps_client.default_bucket_key("id")
+    fake.objects[f"{bucket}/results/abc/model.rvt-1.zip"] = zip_result(make_fixture())
+    stored = {}
+    monkeypatch.setenv("APS_CLIENT_ID", "id")
+    monkeypatch.setenv("APS_CLIENT_SECRET", "secret")
+    monkeypatch.setattr(rvt_convert, "blob_put", lambda path, data, **kw: stored.update({path: data}) or {"url": f"blob://{path}"})
+    draft = rvt_convert.convert_result("results/abc/model.rvt-1.zip", ["Level 2"], "model.rvt")
+    assert draft["suggestions"]["support_point"] == ["S-COLS"]
+    assert draft["revit_report"]["levels"][0]["columns"] == EXPECTED_COLUMNS
+    assert draft["blob_url"].startswith("blob://drafts/")
+    with pytest.raises(ValueError):
+        rvt_convert.convert_result("uploads/../secret.zip", [], None)
+
+
 def test_heal_closes_small_gaps():
     from shapely.geometry import LineString
     from geometry_utils import heal_line_endpoints
