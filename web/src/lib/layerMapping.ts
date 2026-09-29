@@ -3,6 +3,7 @@ import type { DraftData, LayerMapping } from "./types";
 export const EMPTY_LAYER_MAPPING: LayerMapping = {
   boundary: [],
   additional_load: [],
+  opening: [],
   wall: [],
   beam: [],
   support_point: [],
@@ -15,6 +16,7 @@ export function layerMappingFromDraft(draft: DraftData): LayerMapping {
   return {
     boundary: draft.suggestions.boundary || [],
     additional_load: draft.suggestions.additional_load || [],
+    opening: draft.suggestions.opening || [],
     wall: draft.suggestions.wall || [],
     beam: draft.suggestions.beam || [],
     support_point: draft.suggestions.support_point || [],

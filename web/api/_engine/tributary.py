@@ -824,15 +824,36 @@ for entity, source_layer in beam_entities:
 print(f"Extracted {len(beam_data_list)} BEAM display segment(s)")
 
 # --- Reconstruct slab boundary and identify multiple floor plans ---
+def _ring_polygon(ring_df):
+    vertices = [(row['x'], row['y']) for _, row in ring_df.iterrows()]
+    if len(vertices) < 3:
+        return None
+    if vertices[0] != vertices[-1]:
+        vertices.append(vertices[0])
+    return Polygon(vertices).buffer(0)
+
+
 boundary_surfaces = []
 if not boundary_df.empty and 'boundary_id' in boundary_df.columns:
+    hole_polygons_by_parent = {}
+    shell_ids = []
     for boundary_id in boundary_df['boundary_id'].unique():
+        ring_df = boundary_df[boundary_df['boundary_id'] == boundary_id]
+        is_hole = 'ring_role' in ring_df.columns and str(ring_df['ring_role'].iloc[0]) == 'hole'
+        if not is_hole:
+            shell_ids.append(boundary_id)
+            continue
+        hole = _ring_polygon(ring_df.sort_values('vertex_index'))
+        if hole is not None and not hole.is_empty:
+            parent_id = str(boundary_id).rsplit('_H', 1)[0]
+            hole_polygons_by_parent.setdefault(parent_id, []).append(hole)
+
+    for boundary_id in shell_ids:
         ring_df = boundary_df[boundary_df['boundary_id'] == boundary_id].sort_values('vertex_index')
-        vertices = [(row['x'], row['y']) for _, row in ring_df.iterrows()]
-        if len(vertices) >= 3:
-            if vertices[0] != vertices[-1]:
-                vertices.append(vertices[0])
-            polygon = Polygon(vertices).buffer(0)
+        polygon = _ring_polygon(ring_df)
+        if polygon is not None:
+            for hole in hole_polygons_by_parent.get(str(boundary_id), []):
+                polygon = polygon.difference(hole)
             if not polygon.is_empty and polygon.area > 1e-6:
                 load_layer = "BOUNDARY"
                 if "load_layer" in ring_df.columns:

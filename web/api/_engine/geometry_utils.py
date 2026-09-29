@@ -8,15 +8,17 @@ from typing import Dict, Iterable, List, Sequence
 
 import ezdxf
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import polygonize, snap, unary_union
+from shapely.ops import polygonize, unary_union
 
 CURVE_TOLERANCE_FEET = 0.01
 SNAP_TOLERANCE_FEET = 1.0
+HEAL_TOLERANCE_FEET = 1.0 / 12.0
 EDGE_TOLERANCE_FEET = 0.01
 
 DEFAULT_LAYER_CONFIG = {
     "boundary": ["BOUNDARY"],
     "additional_load": [],
+    "opening": [],
     "wall": ["WALL"],
     "beam": ["BEAM", "BEAMS", "TRANSFER", "TRANSFER BEAM", "GIRDER"],
     "support_point": ["POINTS", "COLUMNS", "COLUMN", "POINT"],
@@ -206,6 +208,31 @@ def entity_to_lines(entity, factor: float) -> List[LineString]:
     return []
 
 
+def heal_line_endpoints(lines: Sequence[LineString], tolerance: float) -> List[LineString]:
+    """Cluster segment endpoints within ``tolerance`` so exploded linework with small gaps polygonizes."""
+    if tolerance <= 0:
+        return list(lines)
+    grid: Dict[tuple, List[tuple]] = {}
+
+    def representative(point: tuple) -> tuple:
+        key = (round(point[0] / tolerance), round(point[1] / tolerance))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for candidate in grid.get((key[0] + dx, key[1] + dy), []):
+                    if math.dist(candidate, point) <= tolerance:
+                        return candidate
+        grid.setdefault(key, []).append(point)
+        return point
+
+    healed = []
+    for line in lines:
+        coords = [representative(tuple(coord[:2])) for coord in line.coords]
+        deduped = [coords[0]] + [c for prev, c in zip(coords, coords[1:]) if c != prev]
+        if len(deduped) >= 2:
+            healed.append(LineString(deduped))
+    return healed
+
+
 def polygons_from_entities(entities: Iterable, factor: float, snap_tolerance: float = SNAP_TOLERANCE_FEET) -> List[Polygon]:
     direct_polygons: List[Polygon] = []
     lines: List[LineString] = []
@@ -219,9 +246,9 @@ def polygons_from_entities(entities: Iterable, factor: float, snap_tolerance: fl
     raw_polygons = [polygon.buffer(0) for polygon in direct_polygons if not polygon.is_empty and polygon.area > 1e-6]
 
     if lines:
-        merged = unary_union(lines)
-        snapped = snap(merged, merged, snap_tolerance)
-        raw_polygons.extend(polygon.buffer(0) for polygon in polygonize(snapped))
+        healed = heal_line_endpoints(lines, min(snap_tolerance, HEAL_TOLERANCE_FEET))
+        if healed:
+            raw_polygons.extend(polygon.buffer(0) for polygon in polygonize(unary_union(healed)))
 
     polygons = [polygon for polygon in raw_polygons if not polygon.is_empty and polygon.area > 1e-6]
     unique_polygons: List[Polygon] = []

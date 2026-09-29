@@ -19,6 +19,7 @@ export interface DraftData {
 export interface LayerMapping {
   boundary: string[];
   additional_load: string[];
+  opening: string[];
   wall: string[];
   beam: string[];
   support_point: string[];

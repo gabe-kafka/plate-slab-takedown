@@ -185,6 +185,27 @@ for additional_layer in sorted(additional_load_layers):
     for polygon in polygons_from_entities(additional_entities, factor):
         loop_records.append({"polygon": polygon, "load_layer": additional_layer})
 
+opening_layers = set(layers.get("opening", [])) - boundary_layers - additional_load_layers
+opening_polygons = polygons_from_entities(
+    [entity for entity in msp if entity_matches_layer(entity, opening_layers)], factor
+) if opening_layers else []
+subtracted_openings = 0
+if opening_polygons:
+    kept_records = []
+    for record in loop_records:
+        polygon = record["polygon"]
+        for opening in opening_polygons:
+            if polygon.contains(opening.representative_point()) and opening.area < polygon.area:
+                polygon = polygon.difference(opening)
+                subtracted_openings += 1
+        parts = [polygon] if polygon.geom_type == "Polygon" else list(getattr(polygon, "geoms", []))
+        kept_records.extend(
+            {"polygon": part, "load_layer": record["load_layer"]}
+            for part in parts
+            if part.geom_type == "Polygon" and part.area > 1e-6
+        )
+    loop_records = kept_records
+
 points_df = pd.DataFrame(
     points,
     columns=["x", "y", "source_type", "source_layer", "footprint_id"],
@@ -320,6 +341,7 @@ print("Points:", len(points_df))
 print("Column footprints:", footprints_df["footprint_id"].nunique() if not footprints_df.empty else 0)
 print("Skipped tiny column footprint candidates:", skipped_column_footprints)
 print("Boundary loops:", boundaries_df["boundary_id"].nunique() if not boundaries_df.empty else 0)
+print("Slab openings subtracted:", subtracted_openings)
 print("Column Labels:", len(column_labels_df))
 print("Floor Numbers:", len(floor_numbers_df))
 print("Drafting error candidates:", len(drafting_errors_df), f"(suppressed {suppressed_drafting_errors} that overlap valid footprints)")
