@@ -390,7 +390,7 @@ def cmd_inspect(args) -> int:
 RASTER_RES_IN = 6.0  # half a foot per pixel for the automatic envelope
 
 
-def envelope_polygons(segments: List[tuple], rings: List[List[tuple]], close_ft: float, open_ft: float, min_area_sf: float, units: str, grow_ft: float = 1.0) -> List[Polygon]:
+def envelope_polygons(segments: List[tuple], rings: List[List[tuple]], close_ft: float, open_ft: float, min_area_sf: float, units: str, grow_ft: float = 1.0, snap_ft: float = 1.5) -> List[Polygon]:
     """Draft slab outline from architectural linework.
 
     Rasterise the lines and column rings on a half-foot grid, close gaps up
@@ -455,13 +455,52 @@ def envelope_polygons(segments: List[tuple], rings: List[List[tuple]], close_ft:
         if poly.is_empty:
             continue
         poly = Polygon(poly.exterior)
+        if snap_ft > 0:
+            poly = snap_ring_to_linework(poly, segments, snap_ft / f, res, simplify_tol=0.6 / f)
+        else:
+            poly = poly.simplify(res / 2)
         if grow_ft > 0:
             poly = Polygon(poly.buffer(grow_ft / f, join_style=2).exterior)
-        poly = poly.simplify(res / 2)
         if poly.area * f * f >= min_area_sf:
             polys.append(poly)
     polys.sort(key=lambda p: -p.area)
     return polys
+
+
+def snap_ring_to_linework(poly: Polygon, segments: List[tuple], snap_dist: float, step: float, simplify_tol: float) -> Polygon:
+    """Pull a raster-traced outline onto the real drawing.
+
+    The traced ring is walked every `step`; each sample moves to the nearest
+    point of the architect's linework within `snap_dist`, so a run along a
+    wall becomes that wall and a curve becomes that curve. Samples with no
+    line nearby stay where the raster put them. Collinear runs collapse and
+    leftover stair-steps are smoothed with `simplify_tol`.
+    """
+    from shapely import STRtree
+    from shapely.geometry import LineString
+
+    lines = [LineString(s) for s in segments if s[0] != s[1]]
+    if not lines:
+        return poly.simplify(step / 2)
+    tree = STRtree(lines)
+    ring = poly.exterior
+    n = max(8, int(ring.length / step))
+    snapped = []
+    for i in range(n):
+        p = ring.interpolate(i / n, normalized=True)
+        idx = tree.query_nearest(p, max_distance=snap_dist, return_distance=False)
+        if len(idx):
+            line = lines[int(idx[0])]
+            q = line.interpolate(line.project(p))
+            snapped.append((q.x, q.y))
+        else:
+            snapped.append((p.x, p.y))
+    fixed = Polygon(snapped).buffer(0)
+    if fixed.geom_type == "MultiPolygon":
+        fixed = max(fixed.geoms, key=lambda g: g.area)
+    if fixed.is_empty:
+        return poly.simplify(step / 2)
+    return Polygon(fixed.exterior).simplify(simplify_tol)
 
 
 def load_map(path: str) -> Dict:
@@ -476,7 +515,8 @@ def load_map(path: str) -> Dict:
             "include_columns": bool(auto.get("include_columns", True)),
             "close_ft": float(auto.get("close_ft", 5.0)),
             "open_ft": float(auto.get("open_ft", 2.5)),
-            "grow_ft": float(auto.get("grow_ft", 1.0)),
+            "grow_ft": float(auto.get("grow_ft", 0.0)),
+            "snap_ft": float(auto.get("snap_ft", 1.5)),
             "min_area_sf": float(auto.get("min_area_sf", 500.0)),
         }
     return {
@@ -694,7 +734,7 @@ def cmd_prep(args) -> int:
         if auto and not mapping["layers"]["boundary"]:
             env_rings.extend(loose_rings)
             floor["_auto_boundary"] = envelope_polygons(
-                env_segments, env_rings, auto["close_ft"], auto["open_ft"], auto["min_area_sf"], units, auto["grow_ft"]
+                env_segments, env_rings, auto["close_ft"], auto["open_ft"], auto["min_area_sf"], units, auto["grow_ft"], auto["snap_ft"]
             )
         def points_of(e):
             return (block_footprint(e) if e.dxftype() == "INSERT" else entity_points(e)) or []
