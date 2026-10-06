@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import urllib.request
@@ -38,6 +39,8 @@ ROLE_KEYWORDS = {
         "points",
         "pts",
         "support",
+        "col",
+        "cols",
         "column",
         "columns",
         "column center",
@@ -154,7 +157,7 @@ def suggest_layers_with_ai(
             fallback_suggestions,
             api_key,
         )
-        sanitized = _sanitize_ai_suggestions(ai_suggestions, layer_metadata)
+        sanitized = _sanitize_ai_suggestions(ai_suggestions, layer_metadata, fallback_suggestions)
         if any(sanitized.get(role) for role in ROLE_KEYWORDS):
             return sanitized, "ai"
     except Exception as exc:
@@ -285,9 +288,28 @@ def _extract_response_text(response: Dict) -> str:
     return "".join(fragments).strip()
 
 
+COLUMN_LAYER_NAME_RE = re.compile(r"(^|[^a-z])(col|cols|column|columns|pier|piers|footprint)([^a-z]|$)")
+
+
+def _looks_like_column_layer(layer: str, counts: Dict[str, int]) -> bool:
+    """A layer named for columns that holds closed shapes or points is a
+    support layer, whatever a classifier says about it."""
+    if not COLUMN_LAYER_NAME_RE.search(layer.lower()):
+        return False
+    supports = (
+        counts.get("POINT", 0)
+        + counts.get("CIRCLE", 0)
+        + counts.get("LWPOLYLINE", 0)
+        + counts.get("POLYLINE", 0)
+    )
+    text = counts.get("TEXT", 0) + counts.get("MTEXT", 0)
+    return supports > 0 and supports >= text
+
+
 def _sanitize_ai_suggestions(
     suggestions: Dict,
     layer_metadata: List[Dict],
+    fallback_suggestions: Dict[str, List[str]] | None = None,
 ) -> Dict[str, List[str]]:
     allowed_layers = {item["layer"] for item in layer_metadata}
     layer_counts = {item["layer"]: item.get("counts", {}) for item in layer_metadata}
@@ -302,6 +324,22 @@ def _sanitize_ai_suggestions(
             if layer in allowed_layers and layer not in deduped:
                 deduped.append(layer)
         sanitized[role] = deduped[:5]
+
+    # A column-named layer of closed shapes is a support layer. The model has
+    # been seen filing `COLS` (closed column footprints) under walls, which
+    # leaves no column layer and blocks the job.
+    column_named = [
+        layer for layer in allowed_layers
+        if _looks_like_column_layer(layer, layer_counts.get(layer, {}))
+    ]
+    for layer in column_named:
+        if layer not in sanitized["support_point"]:
+            sanitized["support_point"].append(layer)
+    if not sanitized["support_point"] and fallback_suggestions:
+        sanitized["support_point"] = list(fallback_suggestions.get("support_point", []))
+    support_now = set(sanitized["support_point"])
+    for role in ("wall", "beam", "boundary", "additional_load", "column_label"):
+        sanitized[role] = [layer for layer in sanitized.get(role, []) if layer not in support_now]
 
     boundary_layers = set(sanitized.get("boundary", []))
     additional_load_layers = set(sanitized.get("additional_load", [])) - boundary_layers

@@ -141,6 +141,8 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
       completed, 0 warnings, 8 floors from 7 plans, 670 columns, datum 7/7,
       36 s. The Iso view shows the bar's columns running full height and
       the garage columns starting at different levels down the hill.
+- [x] Bundled as demo 5 in the web app (`manhattan_1300`, `web/api/_engine/demo/1300_manhattan.dxf`)
+      with the layer guesser fixed to recognise `COL`/`COLS` on both the rules and AI paths.
 - [ ] Get A-107, A-108, A-109; convert; re-run `prep` with all ten floors.
 - [ ] Engineer corrects the draft in AutoCAD: extend the 7th's east bay, cut
       shaft and court openings, split balconies to `ADDITIONAL-LOAD`, put

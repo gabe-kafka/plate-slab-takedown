@@ -40,6 +40,10 @@ DEMO_FILES = {
         "path": DEMO_DIR / "246_franklin.dxf",
         "filename": "246 Franklin - input.dxf",
     },
+    "manhattan_1300": {
+        "path": DEMO_DIR / "1300_manhattan.dxf",
+        "filename": "1300 Manhattan - input.dxf",
+    },
 }
 
 
