@@ -84,11 +84,32 @@ Everything here is reviewable by eye; nothing guesses silently.
    ```
    python scripts/dxf_prep.py prep --map tasks/<project>/map.json --out tasks/<project>/<project>_working.dxf -v
    ```
-   Hand the file to the engineer. Their job in AutoCAD, per floor: trace the
-   slab edge on `BOUNDARY`, balconies on `ADDITIONAL-LOAD`, shear walls on
-   `WALL`, closed column rectangles on `COLS` (or clean the mapped ones),
-   column ids on `COL-LABEL`, and nudge the `FLOOR NUMBER` and `DATUM` if
-   needed. Turn `BG-*` off when done; no need to delete it.
+   Two optional map entries do most of the tracing:
+   - `auto_boundary`: a draft `BOUNDARY` per floor from the architect's
+     linework (walls, glazing, floor edges, guardrails, stairs, doors,
+     parking stripes, plus the column footprints). It rasterises on a 0.5 ft
+     grid, closes gaps up to `close_ft` (5), fills the interior, removes
+     slivers under `open_ft` (2.5), grows by `grow_ft` (1) and traces the
+     outline. Print the per-floor area and sanity-check it against the
+     plan. Leave `layers.boundary` empty for it to run. It includes
+     balconies and cuts no openings; it misses areas with no linework
+     around them (an unstriped parking bay). The engineer corrects, not
+     traces.
+   - `auto_labels`: `COL-LABEL` text `C1..Cn` numbered once for the whole
+     building; a column inherits the label of the column within 1 ft below
+     it (floors share model coordinates), so the takedown sheet has one
+     column per physical column line.
+   Hand the file to the engineer. Their job in AutoCAD, per floor: correct
+   the draft slab edge on `BOUNDARY` and cut openings, move balconies to
+   `ADDITIONAL-LOAD`, put shear walls on `WALL`, fix any column on `COLS`,
+   and nudge the `FLOOR NUMBER` and `DATUM` if needed. Turn `BG-*` off
+   when done; no need to delete it.
+   For a first look before the engineer touches it, run the engine locally:
+   ```
+   python scripts/run_engine_local.py tasks/<project>/<project>_working.dxf --out tasks/<project>/out/engine --quiet
+   ```
+   which leaves `tributary_output_fixed.dxf`, `column_load_takedown.xlsx`
+   and `geometry.json` in that folder, exactly as the web app would.
 
 5. **Check, then upload.**
    ```

@@ -387,12 +387,108 @@ def cmd_inspect(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+RASTER_RES_IN = 6.0  # half a foot per pixel for the automatic envelope
+
+
+def envelope_polygons(segments: List[tuple], rings: List[List[tuple]], close_ft: float, open_ft: float, min_area_sf: float, units: str, grow_ft: float = 1.0) -> List[Polygon]:
+    """Draft slab outline from architectural linework.
+
+    Rasterise the lines and column rings on a half-foot grid, close gaps up
+    to `close_ft` (dilate then erode), drop slivers thinner than `open_ft`
+    (erode then dilate), and trace each filled region's outer ring. Holes
+    are ignored on purpose: the engineer cuts real openings afterwards.
+    Returns polygons in source units.
+    """
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter
+    import contourpy
+
+    if not segments and not rings:
+        return []
+    f = unit_factor(units)
+    res = RASTER_RES_IN * (1.0 / 12.0) / f  # source units per pixel (0.5 ft)
+    pts = [p for s in segments for p in s] + [p for r in rings for p in r]
+    pad = 2 * close_ft / f
+    x0 = min(p[0] for p in pts) - pad
+    y0 = min(p[1] for p in pts) - pad
+    W = int((max(p[0] for p in pts) + pad - x0) / res) + 1
+    H = int((max(p[1] for p in pts) + pad - y0) / res) + 1
+    if W * H > 40_000_000:
+        raise RuntimeError("envelope raster too large; reduce the auto_boundary layers")
+    im = Image.new("L", (W, H), 0)
+    draw = ImageDraw.Draw(im)
+
+    def T(p):
+        return ((p[0] - x0) / res, H - 1 - (p[1] - y0) / res)
+
+    for a, b in segments:
+        draw.line([T(a), T(b)], fill=255, width=2)
+    for r in rings:
+        if len(r) >= 3:
+            draw.polygon([T(p) for p in r], fill=255)
+
+    def k(ft):
+        return max(1, int(round(ft / f / res))) * 2 + 1
+
+    def outer_rings(image):
+        mask = (np.array(image) > 127).astype(float)
+        gen = contourpy.contour_generator(z=mask, fill_type="OuterOffset")
+        points, offsets = gen.filled(0.5, 1.5)
+        return [arr[offs[0]:offs[1]] for arr, offs in zip(points, offsets)]
+
+    # 1. close gaps; 2. fill every enclosed interior by redrawing outer rings
+    # solid; 3. only then remove slivers, so a thin perimeter band around a
+    # large empty deck is never eroded open.
+    im = im.filter(ImageFilter.MaxFilter(k(close_ft))).filter(ImageFilter.MinFilter(k(close_ft)))
+    solid = Image.new("L", (W, H), 0)
+    sdraw = ImageDraw.Draw(solid)
+    for ring in outer_rings(im):
+        if len(ring) >= 3:
+            sdraw.polygon([(float(px), float(py)) for px, py in ring], fill=255)
+    if open_ft > 0:
+        solid = solid.filter(ImageFilter.MinFilter(k(open_ft))).filter(ImageFilter.MaxFilter(k(open_ft)))
+    polys = []
+    for outer in outer_rings(solid):
+        poly = Polygon([(x0 + px * res, y0 + (H - 1 - py) * res) for px, py in outer]).buffer(0)
+        if poly.geom_type == "MultiPolygon":
+            poly = max(poly.geoms, key=lambda g: g.area)
+        if poly.is_empty:
+            continue
+        poly = Polygon(poly.exterior)
+        if grow_ft > 0:
+            poly = Polygon(poly.buffer(grow_ft / f, join_style=2).exterior)
+        poly = poly.simplify(res / 2)
+        if poly.area * f * f >= min_area_sf:
+            polys.append(poly)
+    polys.sort(key=lambda p: -p.area)
+    return polys
+
+
 def load_map(path: str) -> Dict:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     layers = {role: list(raw.get("layers", {}).get(role, []) or []) for role in CANONICAL_LAYERS}
     reference = raw.get("reference", {}) or {}
     compiled = {name: [re.compile(p, re.IGNORECASE) for p in pats] for name, pats in reference.items()}
+    auto = raw.get("auto_boundary") or None
+    if auto:
+        auto = {
+            "layers": [re.compile(p, re.IGNORECASE) for p in auto.get("layers", [])],
+            "include_columns": bool(auto.get("include_columns", True)),
+            "close_ft": float(auto.get("close_ft", 5.0)),
+            "open_ft": float(auto.get("open_ft", 2.5)),
+            "grow_ft": float(auto.get("grow_ft", 1.0)),
+            "min_area_sf": float(auto.get("min_area_sf", 500.0)),
+        }
     return {
+        "auto_boundary": auto,
+        "auto_labels": bool(raw.get("auto_labels", False)),
+        # "same_plan": columns drawn on a plan carry that plan's slab (structural
+        # framing plans). "plan_below": columns drawn on a plan stand on it and
+        # carry the slab above (architectural plans), so each output floor takes
+        # its columns from the previous source in `floors`.
+        "columns_from": str(raw.get("columns_from", "same_plan")),
+        "label_prefix": str(raw.get("label_prefix", "C")),
+        "col_label_height_ft": float(raw.get("col_label_height_ft", 1.5)),
         "source_units": str(raw.get("source_units", "in")).lower(),
         "layers": layers,
         "reference": compiled,
@@ -558,14 +654,26 @@ def cmd_prep(args) -> int:
             else doc.modelspace()
         )
         loose_segments: List[tuple] = []  # LINE/ARC drawn directly on a column layer
+        auto = mapping["auto_boundary"]
+        env_segments: List[tuple] = []
+        env_rings: List[List[tuple]] = []
         for e in entities:
             layer = getattr(e.dxf, "layer", "0")
             if e.dxftype() == "INSERT":
                 if layer in support_layers:
                     kept.append((e, CANONICAL_LAYERS["support_point"]))
+                    if auto and auto["include_columns"]:
+                        ring = block_footprint(e)
+                        if ring:
+                            env_rings.append(ring)
                 else:
                     dropped["INSERT (explode_blocks=false)"] += 1
                 continue
+            if auto and e.dxftype() in {"LINE", "LWPOLYLINE", "POLYLINE", "ARC"} and any(p.search(layer) for p in auto["layers"]):
+                epts = flatten_vertices(e, units) if e.dxftype() == "ARC" or has_bulge(e) else entity_points(e)
+                if is_closed(e) and epts and epts[0] != epts[-1]:
+                    epts = epts + [epts[0]]
+                env_segments.extend((epts[i], epts[i + 1]) for i in range(len(epts) - 1))
             target = classify_layer(layer, mapping)
             if target is None:
                 dropped[layer] += 1
@@ -582,6 +690,12 @@ def cmd_prep(args) -> int:
         loose_rings = segments_to_rings(loose_segments)
         floor["_loose_rings"] = loose_rings
         floor["_loose_leftover"] = len(loose_segments) - 4 * len(loose_rings) if loose_segments else 0
+        floor["_auto_boundary"] = []
+        if auto and not mapping["layers"]["boundary"]:
+            env_rings.extend(loose_rings)
+            floor["_auto_boundary"] = envelope_polygons(
+                env_segments, env_rings, auto["close_ft"], auto["open_ft"], auto["min_area_sf"], units, auto["grow_ft"]
+            )
         def points_of(e):
             return (block_footprint(e) if e.dxftype() == "INSERT" else entity_points(e)) or []
 
@@ -624,31 +738,114 @@ def cmd_prep(args) -> int:
     label_h = mapping["label_height_ft"] / unit_factor(units)
     structural_layers = {CANONICAL_LAYERS[r] for r in STRUCTURAL_ROLES}
 
-    print(f"{'FLOOR':10s} {'SOURCE':24s} {'KEPT':>5s} {'DROP':>6s} {'COLS':>5s} {'NAMED':>5s} {'LOOSE':>5s}  OFFSET (source units)")
+    # Column labels that stay the same up the building: columns are matched
+    # floor to floor in the shared source coordinates (same Revit model), so a
+    # column inherits the label of the column within 1 ft below it.
+    label_counter = 0
+    prev_labels: List[tuple] = []  # (x, y, label) in source units, previous floor
+    label_h = mapping["col_label_height_ft"] / unit_factor(units)
+    match_tol = CONTINUOUS_FT / unit_factor(units)
+
+    plan_below = mapping["columns_from"] == "plan_below"
+    col_layer = CANONICAL_LAYERS["support_point"]
+
+    def column_rings_of(src) -> List[List[tuple]]:
+        rings = []
+        for e, target in src["kept"]:
+            if target == col_layer:
+                if e.dxftype() == "INSERT":
+                    ring = block_footprint(e)
+                elif e.dxftype() in {"LWPOLYLINE", "POLYLINE", "CIRCLE"}:
+                    ring = flatten_vertices(e, units) if e.dxftype() == "CIRCLE" or has_bulge(e) else entity_points(e)
+                else:
+                    ring = None
+                if ring and len(ring) >= 3:
+                    rings.append(list(ring))
+        rings.extend(src["floor"].get("_loose_rings", []))
+        return rings
+
+    print(f"{'FLOOR':10s} {'SOURCE':24s} {'KEPT':>5s} {'DROP':>6s} {'COLS':>5s} {'FROM':>6s} {'NAMED':>5s} {'LOOSE':>5s} {'BNDRY SF':>9s}  OFFSET (source units)")
     for index, src in enumerate(sources):
         dx = -common[0] + (index * pitch if axis == "x" else 0.0)
         dy = -common[1] + (index * pitch if axis == "y" else 0.0)
         copied = 0
-        n_cols = n_named = 0
+        n_named = 0
+        floor_meta = src["floor"]
+        # Which source supplies this floor's columns.
+        col_src = src
+        col_from = "same"
+        if plan_below:
+            is_range = bool(re.fullmatch(r"\s*[A-Za-z]*\d+\s*[-–—]\s*[A-Za-z]*\d+\s*", str(floor_meta["label"])))
+            if index > 0 and not is_range:
+                col_src = sources[index - 1]
+                col_from = str(col_src["floor"]["label"])
+            elif index == 0:
+                col_from = "same!"
+                print(f"WARNING: floor '{floor_meta['label']}' is the lowest plan; columns_from=plan_below needs the plan below it, using its own columns", file=sys.stderr)
+            else:
+                col_from = "same"  # typical-floor range: its own columns stand for the plan below
         for e, target in src["kept"]:
-            if e.dxftype() == "INSERT":
-                if named_footprint(e):
-                    n_named += 1
+            if target == col_layer:
+                continue  # columns are written from col_src below
             if copy_entity(msp, e, target, dx, dy, units, structural=target in structural_layers):
                 copied += 1
-                if target == CANONICAL_LAYERS["support_point"]:
-                    n_cols += 1
-        floor_meta = src["floor"]
-        for ring in floor_meta.get("_loose_rings", []):
+        col_rings = column_rings_of(col_src)
+        for ring in col_rings:
+            msp.add_lwpolyline([(x + dx, y + dy) for x, y in ring], format="xy", close=True, dxfattribs={"layer": col_layer})
+            copied += 1
+        n_cols = len(col_rings)
+        n_named = sum(1 for e, t in col_src["kept"] if t == col_layer and e.dxftype() == "INSERT" and named_footprint(e))
+        n_loose = len(col_src["floor"].get("_loose_rings", []))
+        boundary_sf = 0.0
+        boundary_polys = list(floor_meta.get("_auto_boundary", []))
+        for poly in boundary_polys:
+            coords = list(poly.exterior.coords)[:-1]
             msp.add_lwpolyline(
-                [(x + dx, y + dy) for x, y in ring],
+                [(x + dx, y + dy) for x, y in coords],
                 format="xy",
                 close=True,
-                dxfattribs={"layer": CANONICAL_LAYERS["support_point"]},
+                dxfattribs={"layer": CANONICAL_LAYERS["boundary"]},
             )
-            copied += 1
-            n_cols += 1
-        n_loose = len(floor_meta.get("_loose_rings", []))
+            boundary_sf += poly.area * unit_factor(units) ** 2
+        if mapping["auto_labels"] and col_rings:
+            cur_labels: List[tuple] = []
+            centroids = [(sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r), r) for r in col_rings]
+            # A column outside every draft slab loop is dropped by the engine;
+            # leaving its label behind would only mislead the label matching.
+            covered = [p.buffer(0.5 / unit_factor(units)) for p in boundary_polys]
+            def labelable(cx, cy):
+                return not covered or any(c.covers(Point(cx, cy)) for c in covered)
+            # Inherit labels greedily by distance so each lower column is used once.
+            inherited: Dict[int, str] = {}
+            pairs = sorted(
+                (math.hypot(px - cx, py - cy), i, j)
+                for i, (cx, cy, _) in enumerate(centroids)
+                for j, (px, py, _) in enumerate(prev_labels)
+            )
+            used_prev = set()
+            for d, i, j in pairs:
+                if d > match_tol:
+                    break
+                if i in inherited or j in used_prev:
+                    continue
+                inherited[i] = prev_labels[j][2]
+                used_prev.add(j)
+            # deterministic order for new labels: west to east, then south to north
+            for i in sorted(range(len(centroids)), key=lambda i: (round(centroids[i][0]), round(centroids[i][1]))):
+                cx, cy, ring = centroids[i]
+                label = inherited.get(i)
+                if label is None:
+                    label_counter += 1
+                    label = f"{mapping['label_prefix']}{label_counter}"
+                cur_labels.append((cx, cy, label))
+                if not labelable(cx, cy):
+                    continue
+                half_w = (max(p[0] for p in ring) - min(p[0] for p in ring)) / 2
+                half_h = (max(p[1] for p in ring) - min(p[1] for p in ring)) / 2
+                msp.add_text(
+                    label, height=label_h, dxfattribs={"layer": CANONICAL_LAYERS["column_label"]}
+                ).set_placement((cx + half_w + 0.25 * label_h + dx, cy + half_h + 0.25 * label_h + dy))
+            prev_labels = cur_labels
         if floor_meta.get("_loose_leftover"):
             print(f"WARNING: {src['path'].name}: {floor_meta['_loose_leftover']} loose line(s) on the column layer did not close into a footprint", file=sys.stderr)
         label = str(floor_meta["label"])
@@ -662,7 +859,9 @@ def cmd_prep(args) -> int:
         if datum:
             msp.add_point((float(datum[0]) + dx, float(datum[1]) + dy), dxfattribs={"layer": CANONICAL_LAYERS["datum"]})
         dropped_total = sum(src["dropped"].values())
-        print(f"{label:10s} {src['path'].name[:24]:24s} {copied:5d} {dropped_total:6d} {n_cols:5d} {n_named:5d} {n_loose:5d}  ({dx:.1f}, {dy:.1f})")
+        print(f"{label:10s} {src['path'].name[:24]:24s} {copied:5d} {dropped_total:6d} {n_cols:5d} {col_from:>6s} {n_named:5d} {n_loose:5d} {boundary_sf:9,.0f}  ({dx:.1f}, {dy:.1f})")
+    if mapping["auto_labels"]:
+        print(f"COLUMN LABELS {mapping['label_prefix']}1..{mapping['label_prefix']}{label_counter}, consistent across floors where columns stack within {CONTINUOUS_FT:.0f} ft")
 
     if args.verbose:
         print()

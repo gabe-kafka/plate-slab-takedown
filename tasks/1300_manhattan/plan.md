@@ -95,11 +95,23 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
   109 (9), 115 (10), 80 (11).
 - **Slab edge:** Revit's `A-FLOR`, `A-FLOR-OTLN`, `A-FLOR-OVHD` are only the
   edge fragments visible between walls (about 1000 ft of line in 78 pieces
-  per floor; nothing closes at any snap up to 12 ft). They are kept on
-  `BG-HINT` as a tracing aid. `BOUNDARY` is traced by the engineer.
-  `A-FLOR-OTLN` outlines the balconies, so it is the aid for
-  `ADDITIONAL-LOAD` as well. `S-FNDN` lines on the garage floors mark the
-  retaining-wall side.
+  per floor; nothing closes at any snap up to 12 ft). So `prep` drafts
+  `BOUNDARY` itself (`auto_boundary` in the map): walls, glazing, floor
+  edges, guardrails, stairs, doors, parking stripes and column footprints
+  are rasterised on a 0.5 ft grid, gaps up to 5 ft are closed, the
+  interior is filled, slivers under 2.5 ft are removed, the outline grown
+  1 ft so edge columns sit inside, and traced back as one closed polyline
+  per region. Result on this set: one region per floor, 27,094 sf (4-5),
+  28,897 (6), 47,643 (7), 57,663 (8), 60,850 (9), 58,356 (10), 58,641 (11).
+  Balconies are inside the draft (the engineer splits them to
+  `ADDITIONAL-LOAD` if wanted) and openings are not cut. Known miss: the
+  east parking bay on the 7th has no walls or stripes around its 14
+  columns, so the draft stops short of it; extend it by hand. The fragments
+  stay on `BG-HINT` for that editing.
+- **Column labels:** `auto_labels` numbers columns `C1..C123` once for the
+  whole building: a column inherits the label of the column within 1 ft
+  below it (floors share model coordinates), new columns get the next
+  number. The takedown sheet then has one column per physical column line.
 - **Datum:** the `PE#1` elevator label sits at exactly `(-11089.5, -6829.4)`
   on every sheet; the map uses that point. It is inside the elevator shaft,
   so if the shaft gets cut out of `BOUNDARY` as an opening, shift
@@ -118,10 +130,14 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
 - [x] Write the `format-dxf` skill.
 - [x] Receive the CAD; convert DWG to DXF; identify the overview sheets.
 - [x] `inspect`; write `tasks/1300_manhattan/map.json`.
-- [x] `prep` the seven floors in hand to `tasks/1300_manhattan/out/1300_manhattan_working.dxf`.
+- [x] `prep` the seven floors in hand to `tasks/1300_manhattan/out/1300_manhattan_working.dxf`,
+      with draft `BOUNDARY` and consistent `COL-LABEL`; `check` is READY.
+- [x] Run the engine locally on it (`scripts/run_engine_local.py`) for a
+      first-pass tributary DXF and takedown XLSX.
 - [ ] Get A-107, A-108, A-109; convert; re-run `prep` with all ten floors.
-- [ ] Engineer traces `BOUNDARY`, `ADDITIONAL-LOAD`, `WALL`, adds `COL-LABEL`
-      in AutoCAD; save as `tasks/1300_manhattan/out/1300_manhattan_formatted.dxf`.
+- [ ] Engineer corrects the draft in AutoCAD: extend the 7th's east bay, cut
+      shaft and court openings, split balconies to `ADDITIONAL-LOAD`, put
+      shear walls on `WALL`; save as `1300_manhattan_formatted.dxf`.
 - [ ] `check` until READY; upload; confirm inches.
 - [ ] Compare the app's floor list and column counts against the table above.
 

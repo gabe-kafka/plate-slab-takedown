@@ -19,6 +19,19 @@
     "BG-NOTES": ["^A-AREA-IDEN$", "^G-ANNO-TEXT$", "^G-ANNO-DIMS$", "^S-STRS-IDEN$"]
   },
   "explode_blocks": true,
+  "auto_boundary": {
+    "_comment": "Draft slab outline per floor: these layers are rasterised on a 0.5 ft grid, gaps up to close_ft are bridged, slivers thinner than open_ft removed, the outer ring traced. Balconies are included; the engineer splits them to ADDITIONAL-LOAD and cuts openings.",
+    "layers": ["^A-WALL$", "^I-WALL$", "^A-GLAZ", "^A-FLOR", "^S-STRS", "^A-DOOR$", "^C-PRKG$"],
+    "include_columns": true,
+    "close_ft": 5,
+    "open_ft": 2.5,
+    "min_area_sf": 500
+  },
+  "auto_labels": true,
+  "columns_from": "plan_below",
+  "_columns_note": "Architectural plans show the columns standing on a floor, which carry the slab above. So the 11th slab (amenity roof + SL2) takes the 116 columns drawn on the 10th plan, the 10th takes the 9th's, and so on. Range plans (4-5) use their own columns as the typical floor. The lowest floor in hand uses its own until A-107/A-108 arrive.",
+  "label_prefix": "C",
+  "col_label_height_ft": 1.5,
   "datum_xy": [-11089.5, -6829.4],
   "_datum_note": "Insert point of the PE#1 elevator label; identical on every sheet A-100..A-106. If the engineer cuts the elevator shaft out of BOUNDARY as an opening, move this a few feet onto the corridor slab (same offset on every floor is automatic).",
   "stack": {"axis": "y", "gap_ft": 60},
