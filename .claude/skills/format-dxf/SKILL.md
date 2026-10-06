@@ -84,26 +84,41 @@ Everything here is reviewable by eye; nothing guesses silently.
    ```
    python scripts/dxf_prep.py prep --map tasks/<project>/map.json --out tasks/<project>/<project>_working.dxf -v
    ```
-   Two optional map entries do most of the tracing:
-   - `auto_boundary`: a draft `BOUNDARY` per floor from the architect's
-     linework (walls, glazing, floor edges, guardrails, stairs, doors,
-     parking stripes, plus the column footprints). It rasterises on a 0.5 ft
-     grid, closes gaps up to `close_ft` (5), fills the interior, removes
-     slivers under `open_ft` (2.5), grows by `grow_ft` (1) and traces the
-     outline. Print the per-floor area and sanity-check it against the
-     plan. Leave `layers.boundary` empty for it to run. It includes
-     balconies and cuts no openings; it misses areas with no linework
-     around them (an unstriped parking bay). The engineer corrects, not
-     traces.
+   Add `--skip-missing` to build the floors in hand while sheets are still
+   outstanding. Three optional map entries do most of the tracing:
+   - `auto_boundary`: a draft `BOUNDARY` per floor, fitted exactly onto the
+     architect's lines. First a raster pass finds where the slab is: the
+     `layers` linework (walls, glazing, floor edges, guardrails, stairs,
+     doors, parking stripes, plus the column footprints) is drawn on a
+     0.5 ft grid, gaps up to `close_ft` (5) are closed, the interior filled,
+     slivers under `open_ft` (2.5) removed, and the outline traced. Then
+     the outline is walked every 0.25 ft and pulled onto the `snap` tiers,
+     in order of trust, each with its own reach:
+     ```json
+     "snap": [
+       {"name": "FLOR", "layers": ["^A-FLOR$", "^A-FLOR-OTLN$"], "within_ft": 2.5, "show": "all"},
+       {"name": "RAIL", "layers": ["^A-FLOR-HRAL$"], "within_ft": 2.0, "show": "near"},
+       {"name": "WALL", "layers": ["^A-WALL$", "^A-GLAZ", "^A-WALL-PATT$"], "within_ft": 1.5, "show": "near"}
+     ]
+     ```
+     A line counts only when it runs along the outline, not across it. Two
+     lines meeting within 3 ft of where the outline leaves one and joins the
+     next make an exact corner; otherwise a short jog. A stretch with no line
+     that is under 10 ft and nearly straight between its two neighbours
+     becomes one straight segment (a "bridge": the edge hidden under a party
+     wall between two balconies). Anything else keeps the raster trace and
+     is reported as a gap. Leave `layers.boundary` empty for it to run.
+     Balconies are inside the loop; no openings are cut.
+   - `auto_walls`: closed `WALL` outlines from the architect's wall poché
+     (hatches on `hatch_layers` that read as a band `min_thickness_in` to
+     `max_thickness_in` thick and at least `min_length_ft` long).
    - `auto_labels`: `COL-LABEL` text `C1..Cn` numbered once for the whole
      building; a column inherits the label of the column within 1 ft below
      it (floors share model coordinates), so the takedown sheet has one
      column per physical column line.
-   Hand the file to the engineer. Their job in AutoCAD, per floor: correct
-   the draft slab edge on `BOUNDARY` and cut openings, move balconies to
-   `ADDITIONAL-LOAD`, put shear walls on `WALL`, fix any column on `COLS`,
-   and nudge the `FLOOR NUMBER` and `DATUM` if needed. Turn `BG-*` off
-   when done; no need to delete it.
+   The table prints, per floor, `ON%` (share of the loop lying on a
+   candidate line), `BRDG` (bridges) and `GAPS`. Sanity-check `BNDRY SF`
+   against the plan. `-v` lists every gap with its coordinates.
    For a first look before the engineer touches it, run the engine locally:
    ```
    python scripts/run_engine_local.py tasks/<project>/<project>_working.dxf --out tasks/<project>/out/engine --quiet
@@ -111,7 +126,31 @@ Everything here is reviewable by eye; nothing guesses silently.
    which leaves `tributary_output_fixed.dxf`, `column_load_takedown.xlsx`
    and `geometry.json` in that folder, exactly as the web app would.
 
-5. **Check, then upload.**
+5. **Review in AutoCAD (the engineer), then close.** The working DXF
+   carries, besides the canonical layers and `BG-*`, the review layers:
+   - `RV-EDGE-<tier>`: the candidate slab-edge lines (one layer per `snap`
+     tier, `show: "all"` writes every line of those layers, `"near"` only
+     the ones within reach of the draft). Delete the ones that are not slab
+     edge, move or draw lines where the edge should be (any line on these
+     layers counts; the tier sets its reach), keep the rest.
+   - `RV-GAP`: a circle and the traced stretch at every gap. Draw the edge
+     there on an `RV-EDGE-*` layer, or reshape `BOUNDARY` itself; the loop
+     is re-fitted either way.
+   - `WALL`: every poché wall; delete the ones that do not bear.
+   The engineer also cuts openings and splits balconies onto
+   `ADDITIONAL-LOAD` (those loops are fitted too), fixes columns, nudges
+   `FLOOR NUMBER` / `DATUM`, and saves the file in place. Then:
+   ```
+   python scripts/dxf_prep.py close tasks/<project>/<project>_working.dxf --out tasks/<project>/<project>_formatted.dxf --map tasks/<project>/map.json --marks tasks/<project>/<project>_gaps.dxf -v
+   ```
+   `close` re-fits every `BOUNDARY` / `ADDITIONAL-LOAD` loop onto the lines
+   left on `RV-EDGE-*`, prints the same `ON% / BRDG / GAPS` table, writes
+   the formatted DXF with `RV-*` and `BG-*` stripped, and (with `--marks`)
+   a small DXF holding only the new gap marks to insert over the working
+   file for the next pass. Repeat until the gaps left are ones the engineer
+   accepts. Round trips are cheap; nothing is traced by hand twice.
+
+6. **Check, then upload.**
    ```
    python scripts/dxf_prep.py check tasks/<project>/<project>_formatted.dxf
    ```
