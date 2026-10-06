@@ -9,8 +9,7 @@
 
 ## Vercel
 
-- Project `conc-slab-tributary-area-public` under team `gabe-kafkas-projects`, production branch `main`, root directory `web`.
-- The project has no Git link in Vercel (it is absent from the team's linked-projects list), so pushes and merges do not start builds. Until the repo is connected in the dashboard (project Settings → Git), deploy after every merge to `main` with the Vercel connector's `create_deployment` (gitSource github, org `gabe-kafka`, repo `plate-slab-takedown`, ref `main`, target `production`) and verify on the live site.
+- Project `conc-slab-tributary-area-public` under team `gabe-kafkas-projects`, Git-linked to this repo, production branch `main`, root directory `web`. A merge to `main` deploys on its own; confirm the deployment appears for the merge SHA and check the live site.
 - Deploys, redeploys and rollbacks are routine: do them when the work calls for it, verify on the live site.
 - Environment variables, domains and deployment protection: ask first.
 
