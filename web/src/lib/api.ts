@@ -8,7 +8,12 @@ import type {
 } from "./types";
 
 const BASE = "";
-export type DemoId = "default" | "geom_clean_1" | "fulton_356" | "franklin_246";
+export type DemoId =
+  | "default"
+  | "geom_clean_1"
+  | "fulton_356"
+  | "franklin_246"
+  | "manhattan_1300";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);

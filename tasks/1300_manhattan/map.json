@@ -1,0 +1,64 @@
+{
+  "_comment": "1300 Manhattan Ave (CPA 23-037A). Sources are DXF exports of the OVERVIEW sheets A-100..A-109 only; the a/b sheets are the same model cropped to one section. Set source_dir to the folder holding the exported DXFs or pass --src.",
+  "source_units": "in",
+  "source_dir": "tasks/1300_manhattan/out/src",
+  "layers": {
+    "boundary": [],
+    "additional_load": [],
+    "wall": [],
+    "beam": [],
+    "support_point": ["S-COLS"],
+    "column_label": [],
+    "floor_label": [],
+    "datum": []
+  },
+  "reference": {
+    "BG-ARCH": ["^A-WALL$", "^I-WALL$", "^A-GLAZ$", "^A-GLAZ-CURT$", "^A-DOOR$", "^S-STRS$", "^S-STRS-MBND$", "^A-ANNO-MATC$"],
+    "BG-HINT": ["^A-FLOR", "^S-FNDN$", "^C-PROP-LINE$"],
+    "BG-PARK": ["^C-PRKG$"],
+    "BG-NOTES": ["^A-AREA-IDEN$", "^G-ANNO-TEXT$", "^G-ANNO-DIMS$", "^S-STRS-IDEN$"]
+  },
+  "explode_blocks": true,
+  "auto_boundary": {
+    "_comment": "Draft slab outline per floor: these layers are rasterised on a 0.5 ft grid, gaps up to close_ft are bridged, slivers thinner than open_ft removed, the outer ring traced. Balconies are included; the engineer splits them to ADDITIONAL-LOAD and cuts openings.",
+    "layers": ["^A-WALL$", "^I-WALL$", "^A-GLAZ", "^A-FLOR", "^S-STRS", "^A-DOOR$", "^C-PRKG$"],
+    "include_columns": true,
+    "close_ft": 5,
+    "open_ft": 2.5,
+    "snap": [
+      {"layers": ["^A-FLOR$", "^A-FLOR-OTLN$", "^A-FLOR-HRAL$"], "within_ft": 2.5},
+      {"layers": ["^A-WALL$", "^A-GLAZ$", "^A-GLAZ-CURT$", "^A-WALL-PATT$"], "within_ft": 1.5}
+    ],
+    "_snap_note": "Tier 1 is the architect's own floor edge (Revit floor lines, balcony outlines, guardrails at open edges); tier 2 is the exterior wall face where the edge is hidden under a wall. Nothing else pulls the boundary.",
+    "min_area_sf": 500
+  },
+  "auto_walls": {
+    "hatch_layers": ["^A-WALL-PATT$"],
+    "patterns": [],
+    "min_thickness_in": 6,
+    "max_thickness_in": 18,
+    "min_length_ft": 3,
+    "_note": "The architect pochés concrete walls on A-WALL-PATT: 8 to 12 in bands on Stairs 1-4, the PE#1/SE#1 shafts and the garage retaining walls. Each band outline becomes a closed WALL polyline, placed with the columns of the plan below."
+  },
+  "auto_labels": true,
+  "columns_from": "plan_below",
+  "_columns_note": "Architectural plans show the columns standing on a floor, which carry the slab above. So the 11th slab (amenity roof + SL2) takes the 116 columns drawn on the 10th plan, the 10th takes the 9th's, and so on. Range plans (4-5) use their own columns as the typical floor. The lowest floor in hand uses its own until A-107/A-108 arrive.",
+  "label_prefix": "C",
+  "col_label_height_ft": 1.5,
+  "datum_xy": [-11089.5, -6829.4],
+  "_datum_note": "Insert point of the PE#1 elevator label; identical on every sheet A-100..A-106. If the engineer cuts the elevator shaft out of BOUNDARY as an opening, move this a few feet onto the corridor slab (same offset on every floor is automatic).",
+  "stack": {"axis": "y", "gap_ft": 60},
+  "label_height_ft": 8,
+  "floors": [
+    {"file": "A-108.dxf", "label": "1"},
+    {"file": "A-107.dxf", "label": "2-3"},
+    {"file": "A-106.dxf", "label": "4-5"},
+    {"file": "A-105.dxf", "label": "6"},
+    {"file": "A-104.dxf", "label": "7"},
+    {"file": "A-103.dxf", "label": "8"},
+    {"file": "A-102.dxf", "label": "9"},
+    {"file": "A-101.dxf", "label": "10"},
+    {"file": "A-100.dxf", "label": "11"},
+    {"file": "A-109.dxf", "label": "ROOF"}
+  ]
+}
