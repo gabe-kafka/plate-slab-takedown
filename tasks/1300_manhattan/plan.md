@@ -93,21 +93,29 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
   checked. Four columns per sheet on 7th to 10th are loose lines, not blocks;
   the tool closes those too. Per floor: 62 (4-5), 105 (6), 107 (7), 107 (8),
   109 (9), 115 (10), 80 (11).
-- **Slab edge:** Revit's `A-FLOR`, `A-FLOR-OTLN`, `A-FLOR-OVHD` are only the
-  edge fragments visible between walls (about 1000 ft of line in 78 pieces
-  per floor; nothing closes at any snap up to 12 ft). So `prep` drafts
-  `BOUNDARY` itself (`auto_boundary` in the map): walls, glazing, floor
-  edges, guardrails, stairs, doors, parking stripes and column footprints
-  are rasterised on a 0.5 ft grid, gaps up to 5 ft are closed, the
-  interior is filled, slivers under 2.5 ft are removed, the outline grown
-  1 ft so edge columns sit inside, and traced back as one closed polyline
-  per region. Result on this set: one region per floor, 27,094 sf (4-5),
-  28,897 (6), 47,643 (7), 57,663 (8), 60,850 (9), 58,356 (10), 58,641 (11).
-  Balconies are inside the draft (the engineer splits them to
-  `ADDITIONAL-LOAD` if wanted) and openings are not cut. Known miss: the
-  east parking bay on the 7th has no walls or stripes around its 14
-  columns, so the draft stops short of it; extend it by hand. The fragments
-  stay on `BG-HINT` for that editing.
+- **Slab edge:** the architect's export has no closed slab edge. Revit's
+  `A-FLOR` and `A-FLOR-OTLN` carry the floor edge only where it is visible
+  between walls, on the overview and the 1/8" blow-up sheets alike (about
+  half the perimeter, in 50 to 90 pieces per floor). So `prep` drafts
+  `BOUNDARY` in two steps: a raster fill of the architect's linework finds
+  where the perimeter is, then every half foot of that outline is snapped
+  onto the architect's own lines in order of trust: first the floor-edge
+  lines, balcony outlines and guardrails within 2.5 ft, then the exterior
+  wall and curtain-wall faces within 1.5 ft, and nothing else. The result
+  is the architect's slab edge wherever one was drawn, the wall face where
+  the edge is hidden under the wall, and a raster trace only where neither
+  exists. Areas: 25,280 sf (4-5), 26,894 (6), 45,374 (7), 55,153 (8),
+  58,456 (9), 56,148 (10), 56,389 (11). Balconies are inside the draft and
+  openings are not cut. Known miss: the unstriped east parking bay on the
+  7th, 14 columns outside; extend by hand.
+- **Structural walls:** the architect pochés concrete walls as hatches on
+  `A-WALL-PATT`: 8 to 12 in bands on Stairs 1 to 4, the PE#1/PE#2 and SE#1
+  shafts, and the garage retaining and edge walls. `auto_walls` turns each
+  hatch outline that reads as a thin band (thickness 6 to 18 in, at least
+  3 ft long) into a closed `WALL` polyline, placed with the columns of the
+  plan below. 21 wall outlines on the bar floors, 36 to 45 with the garage.
+  With walls carrying slab, the biggest column region drops from 1,456 sf
+  to 824 sf and the cores stop collecting area.
 - **Column labels:** `auto_labels` numbers columns `C1..C123` once for the
   whole building: a column inherits the label of the column within 1 ft
   below it (floors share model coordinates), new columns get the next

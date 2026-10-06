@@ -390,7 +390,16 @@ def cmd_inspect(args) -> int:
 RASTER_RES_IN = 6.0  # half a foot per pixel for the automatic envelope
 
 
-def envelope_polygons(segments: List[tuple], rings: List[List[tuple]], close_ft: float, open_ft: float, min_area_sf: float, units: str, grow_ft: float = 1.0, snap_ft: float = 1.5) -> List[Polygon]:
+def envelope_polygons(
+    segments: List[tuple],
+    rings: List[List[tuple]],
+    close_ft: float,
+    open_ft: float,
+    min_area_sf: float,
+    units: str,
+    grow_ft: float = 0.0,
+    snap_tiers: List[tuple] | None = None,
+) -> List[Polygon]:
     """Draft slab outline from architectural linework.
 
     Rasterise the lines and column rings on a half-foot grid, close gaps up
@@ -455,8 +464,8 @@ def envelope_polygons(segments: List[tuple], rings: List[List[tuple]], close_ft:
         if poly.is_empty:
             continue
         poly = Polygon(poly.exterior)
-        if snap_ft > 0:
-            poly = snap_ring_to_linework(poly, segments, snap_ft / f, res, simplify_tol=0.6 / f)
+        if snap_tiers:
+            poly = snap_ring_to_linework(poly, [(segs, d / f) for segs, d in snap_tiers], res, simplify_tol=0.6 / f)
         else:
             poly = poly.simplify(res / 2)
         if grow_ft > 0:
@@ -467,40 +476,87 @@ def envelope_polygons(segments: List[tuple], rings: List[List[tuple]], close_ft:
     return polys
 
 
-def snap_ring_to_linework(poly: Polygon, segments: List[tuple], snap_dist: float, step: float, simplify_tol: float) -> Polygon:
+def snap_ring_to_linework(poly: Polygon, tiers: List[tuple], step: float, simplify_tol: float) -> Polygon:
     """Pull a raster-traced outline onto the real drawing.
 
-    The traced ring is walked every `step`; each sample moves to the nearest
-    point of the architect's linework within `snap_dist`, so a run along a
-    wall becomes that wall and a curve becomes that curve. Samples with no
-    line nearby stay where the raster put them. Collinear runs collapse and
-    leftover stair-steps are smoothed with `simplify_tol`.
+    `tiers` is an ordered list of (segments, snap_dist): the traced ring is
+    walked every `step`, and each sample moves to the nearest point of the
+    first tier that has a line within its distance. With the architect's
+    floor-edge lines as tier one and the exterior wall faces as tier two,
+    the boundary is the architect's slab edge wherever one was drawn, the
+    wall face where the edge is hidden under a wall, and the raster trace
+    only where neither exists. Collinear runs collapse and leftover
+    stair-steps are smoothed with `simplify_tol`.
     """
     from shapely import STRtree
     from shapely.geometry import LineString
 
-    lines = [LineString(s) for s in segments if s[0] != s[1]]
-    if not lines:
+    built = []
+    for segments, dist in tiers:
+        lines = [LineString(s) for s in segments if s[0] != s[1]]
+        if lines:
+            built.append((lines, STRtree(lines), dist))
+    if not built:
         return poly.simplify(step / 2)
-    tree = STRtree(lines)
     ring = poly.exterior
     n = max(8, int(ring.length / step))
     snapped = []
     for i in range(n):
         p = ring.interpolate(i / n, normalized=True)
-        idx = tree.query_nearest(p, max_distance=snap_dist, return_distance=False)
-        if len(idx):
-            line = lines[int(idx[0])]
-            q = line.interpolate(line.project(p))
-            snapped.append((q.x, q.y))
-        else:
-            snapped.append((p.x, p.y))
+        target = None
+        for lines, tree, dist in built:
+            idx = tree.query_nearest(p, max_distance=dist, return_distance=False)
+            if len(idx):
+                line = lines[int(idx[0])]
+                q = line.interpolate(line.project(p))
+                target = (q.x, q.y)
+                break
+        snapped.append(target or (p.x, p.y))
     fixed = Polygon(snapped).buffer(0)
     if fixed.geom_type == "MultiPolygon":
         fixed = max(fixed.geoms, key=lambda g: g.area)
     if fixed.is_empty:
         return poly.simplify(step / 2)
     return Polygon(fixed.exterior).simplify(simplify_tol)
+
+
+def hatch_wall_rings(hatch, rules: Dict, units: str) -> List[List[tuple]]:
+    """Wall outlines from a wall poché hatch.
+
+    Architects fill structural (concrete) walls with a hatch pattern on a
+    wall-pattern layer. Each boundary path that reads as a thin band
+    (thickness = 2 * area / perimeter within the configured range) is a wall
+    outline; blobs and hairlines are not.
+    """
+    if rules["patterns"] and str(hatch.dxf.pattern_name) not in rules["patterns"]:
+        return []
+    f = unit_factor(units)
+    rings = []
+    for p in hatch.paths:
+        pts: List[tuple] = []
+        try:
+            if p.type == ezdxf.entities.BoundaryPathType.POLYLINE:
+                pts = [(v.x, v.y) for v in p.vertices]
+            else:
+                for edge in p.edges:
+                    if edge.type == ezdxf.entities.EdgeType.LINE:
+                        pts.append((edge.start.x, edge.start.y))
+                    elif edge.type == ezdxf.entities.EdgeType.ARC:
+                        # approximate: take the arc's start point only; walls here are straight
+                        pts.append((edge.center.x + edge.radius * math.cos(math.radians(edge.start_angle)),
+                                    edge.center.y + edge.radius * math.sin(math.radians(edge.start_angle))))
+        except Exception:
+            continue
+        if len(pts) < 3:
+            continue
+        poly = Polygon(pts).buffer(0)
+        if poly.is_empty or poly.geom_type != "Polygon":
+            continue
+        thickness_in = (2 * poly.area / poly.length) * f * 12
+        length_ft = (poly.length / 2) * f
+        if rules["min_thickness_in"] <= thickness_in <= rules["max_thickness_in"] and length_ft >= rules["min_length_ft"]:
+            rings.append(list(poly.exterior.coords)[:-1])
+    return rings
 
 
 def load_map(path: str) -> Dict:
@@ -510,17 +566,35 @@ def load_map(path: str) -> Dict:
     compiled = {name: [re.compile(p, re.IGNORECASE) for p in pats] for name, pats in reference.items()}
     auto = raw.get("auto_boundary") or None
     if auto:
+        # snap: ordered tiers [{"layers": [regex...], "within_ft": d}, ...].
+        # Default: the fill layers themselves within 1.5 ft (old behaviour).
+        snap_raw = auto.get("snap")
+        if snap_raw is None:
+            snap_raw = [{"layers": auto.get("layers", []), "within_ft": auto.get("snap_ft", 1.5)}]
         auto = {
             "layers": [re.compile(p, re.IGNORECASE) for p in auto.get("layers", [])],
             "include_columns": bool(auto.get("include_columns", True)),
             "close_ft": float(auto.get("close_ft", 5.0)),
             "open_ft": float(auto.get("open_ft", 2.5)),
             "grow_ft": float(auto.get("grow_ft", 0.0)),
-            "snap_ft": float(auto.get("snap_ft", 1.5)),
+            "snap": [
+                {"layers": [re.compile(p, re.IGNORECASE) for p in t.get("layers", [])], "within_ft": float(t.get("within_ft", 1.5))}
+                for t in snap_raw
+            ],
             "min_area_sf": float(auto.get("min_area_sf", 500.0)),
+        }
+    walls = raw.get("auto_walls") or None
+    if walls:
+        walls = {
+            "hatch_layers": [re.compile(p, re.IGNORECASE) for p in walls.get("hatch_layers", [])],
+            "patterns": [str(p) for p in walls.get("patterns", [])],
+            "min_thickness_in": float(walls.get("min_thickness_in", 6.0)),
+            "max_thickness_in": float(walls.get("max_thickness_in", 18.0)),
+            "min_length_ft": float(walls.get("min_length_ft", 3.0)),
         }
     return {
         "auto_boundary": auto,
+        "auto_walls": walls,
         "auto_labels": bool(raw.get("auto_labels", False)),
         # "same_plan": columns drawn on a plan carry that plan's slab (structural
         # framing plans). "plan_below": columns drawn on a plan stand on it and
@@ -697,6 +771,9 @@ def cmd_prep(args) -> int:
         auto = mapping["auto_boundary"]
         env_segments: List[tuple] = []
         env_rings: List[List[tuple]] = []
+        snap_segments: List[List[tuple]] = [[] for _ in (auto["snap"] if auto else [])]
+        walls_rule = mapping["auto_walls"]
+        wall_rings: List[List[tuple]] = []
         for e in entities:
             layer = getattr(e.dxf, "layer", "0")
             if e.dxftype() == "INSERT":
@@ -709,11 +786,20 @@ def cmd_prep(args) -> int:
                 else:
                     dropped["INSERT (explode_blocks=false)"] += 1
                 continue
-            if auto and e.dxftype() in {"LINE", "LWPOLYLINE", "POLYLINE", "ARC"} and any(p.search(layer) for p in auto["layers"]):
-                epts = flatten_vertices(e, units) if e.dxftype() == "ARC" or has_bulge(e) else entity_points(e)
-                if is_closed(e) and epts and epts[0] != epts[-1]:
-                    epts = epts + [epts[0]]
-                env_segments.extend((epts[i], epts[i + 1]) for i in range(len(epts) - 1))
+            if walls_rule and e.dxftype() == "HATCH" and any(p.search(layer) for p in walls_rule["hatch_layers"]):
+                wall_rings.extend(hatch_wall_rings(e, walls_rule, units))
+            if auto and e.dxftype() in {"LINE", "LWPOLYLINE", "POLYLINE", "ARC"}:
+                in_fill = any(p.search(layer) for p in auto["layers"])
+                tier_hits = [k for k, t in enumerate(auto["snap"]) if any(p.search(layer) for p in t["layers"])]
+                if in_fill or tier_hits:
+                    epts = flatten_vertices(e, units) if e.dxftype() == "ARC" or has_bulge(e) else entity_points(e)
+                    if is_closed(e) and epts and epts[0] != epts[-1]:
+                        epts = epts + [epts[0]]
+                    segs = [(epts[i], epts[i + 1]) for i in range(len(epts) - 1)]
+                    if in_fill:
+                        env_segments.extend(segs)
+                    for k in tier_hits:
+                        snap_segments[k].extend(segs)
             target = classify_layer(layer, mapping)
             if target is None:
                 dropped[layer] += 1
@@ -730,11 +816,13 @@ def cmd_prep(args) -> int:
         loose_rings = segments_to_rings(loose_segments)
         floor["_loose_rings"] = loose_rings
         floor["_loose_leftover"] = len(loose_segments) - 4 * len(loose_rings) if loose_segments else 0
+        floor["_auto_walls"] = wall_rings if not mapping["layers"]["wall"] else []
         floor["_auto_boundary"] = []
         if auto and not mapping["layers"]["boundary"]:
             env_rings.extend(loose_rings)
+            tiers = [(snap_segments[k], t["within_ft"]) for k, t in enumerate(auto["snap"])]
             floor["_auto_boundary"] = envelope_polygons(
-                env_segments, env_rings, auto["close_ft"], auto["open_ft"], auto["min_area_sf"], units, auto["grow_ft"], auto["snap_ft"]
+                env_segments, env_rings, auto["close_ft"], auto["open_ft"], auto["min_area_sf"], units, auto["grow_ft"], tiers
             )
         def points_of(e):
             return (block_footprint(e) if e.dxftype() == "INSERT" else entity_points(e)) or []
@@ -804,7 +892,7 @@ def cmd_prep(args) -> int:
         rings.extend(src["floor"].get("_loose_rings", []))
         return rings
 
-    print(f"{'FLOOR':10s} {'SOURCE':24s} {'KEPT':>5s} {'DROP':>6s} {'COLS':>5s} {'FROM':>6s} {'NAMED':>5s} {'LOOSE':>5s} {'BNDRY SF':>9s}  OFFSET (source units)")
+    print(f"{'FLOOR':10s} {'SOURCE':24s} {'KEPT':>5s} {'DROP':>6s} {'COLS':>5s} {'FROM':>6s} {'NAMED':>5s} {'LOOSE':>5s} {'WALLS':>5s} {'BNDRY SF':>9s}  OFFSET (source units)")
     for index, src in enumerate(sources):
         dx = -common[0] + (index * pitch if axis == "x" else 0.0)
         dy = -common[1] + (index * pitch if axis == "y" else 0.0)
@@ -836,6 +924,11 @@ def cmd_prep(args) -> int:
         n_cols = len(col_rings)
         n_named = sum(1 for e, t in col_src["kept"] if t == col_layer and e.dxftype() == "INSERT" and named_footprint(e))
         n_loose = len(col_src["floor"].get("_loose_rings", []))
+        # Walls stand on the plan below like the columns do.
+        n_walls = 0
+        for ring in col_src["floor"].get("_auto_walls", []):
+            msp.add_lwpolyline([(x + dx, y + dy) for x, y in ring], format="xy", close=True, dxfattribs={"layer": CANONICAL_LAYERS["wall"]})
+            n_walls += 1
         boundary_sf = 0.0
         boundary_polys = list(floor_meta.get("_auto_boundary", []))
         for poly in boundary_polys:
@@ -899,7 +992,7 @@ def cmd_prep(args) -> int:
         if datum:
             msp.add_point((float(datum[0]) + dx, float(datum[1]) + dy), dxfattribs={"layer": CANONICAL_LAYERS["datum"]})
         dropped_total = sum(src["dropped"].values())
-        print(f"{label:10s} {src['path'].name[:24]:24s} {copied:5d} {dropped_total:6d} {n_cols:5d} {col_from:>6s} {n_named:5d} {n_loose:5d} {boundary_sf:9,.0f}  ({dx:.1f}, {dy:.1f})")
+        print(f"{label:10s} {src['path'].name[:24]:24s} {copied:5d} {dropped_total:6d} {n_cols:5d} {col_from:>6s} {n_named:5d} {n_loose:5d} {n_walls:5d} {boundary_sf:9,.0f}  ({dx:.1f}, {dy:.1f})")
     if mapping["auto_labels"]:
         print(f"COLUMN LABELS {mapping['label_prefix']}1..{mapping['label_prefix']}{label_counter}, consistent across floors where columns stack within {CONTINUOUS_FT:.0f} ft")
 
