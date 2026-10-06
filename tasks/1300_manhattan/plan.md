@@ -165,6 +165,14 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
       `dxf_prep.py close ... --out 1300_manhattan_formatted.dxf --marks ...`
       and repeat until the gap list is acceptable.
 - [ ] `check` until READY; upload; confirm inches.
+- [x] Preliminary column sizing from the fitted draft:
+      `tasks/1300_manhattan/prelim_column_sizing.xlsx` (built by
+      `scripts/prelim_column_sizing.py` from the engine workspace). Floors 1
+      to 3 and the roof are assumed from the 4th and 11th; loads and
+      occupancies are the yellow cells in INPUTS. First result at 6 ksi and
+      2 % steel: 14x24 carries 115 of the 123 column lines at the base, five
+      need 14x30, the architect's 14x36 is never governed by axial load.
+      Re-run after the engineer's pass and when A-107/108/109 arrive.
 - [ ] Compare the app's floor list and column counts against the table above.
 
 ## Open questions
