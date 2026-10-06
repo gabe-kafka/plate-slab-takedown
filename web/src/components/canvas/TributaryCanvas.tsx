@@ -454,8 +454,8 @@ export default function TributaryCanvas({
       if (!pointer) return;
 
       const zoomFactor = e.evt.ctrlKey
-        ? 1 - e.evt.deltaY * 0.01       // trackpad pinch (fine)
-        : 1 - e.evt.deltaY * 0.002;     // scroll wheel (coarser steps)
+        ? 1 - e.evt.deltaY * 0.005      // trackpad pinch (fine)
+        : 1 - e.evt.deltaY * 0.001;     // scroll wheel (coarser steps)
       const newScale = Math.max(0.05, Math.min(oldScale * zoomFactor, 100));
 
       const mousePointTo = {
