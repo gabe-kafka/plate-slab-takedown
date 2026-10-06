@@ -883,13 +883,15 @@ def classify_layer(layer: str, mapping: Dict) -> str | None:
     return None
 
 
-def ensure_layers(doc, mapping: Dict | None) -> None:
+def ensure_layers(doc, mapping: Dict | None, review: bool = True, background: bool = True) -> None:
     for role, name in CANONICAL_LAYERS.items():
         if name not in doc.layers:
             doc.layers.add(name, color=CANONICAL_COLORS.get(name, 7))
-    for ref_name in (mapping or {}).get("reference", {}):
+    for ref_name in (mapping or {}).get("reference", {}) if background else []:
         if ref_name not in doc.layers:
             doc.layers.add(ref_name, color=BACKGROUND_COLOR)
+    if not review:
+        return
     auto = (mapping or {}).get("auto_boundary")
     for k, tier in enumerate(auto["snap"] if auto else []):
         name = REVIEW_EDGE_PREFIX + tier["name"]
@@ -1338,7 +1340,7 @@ def cmd_close(args) -> int:
 
     out = ezdxf.new("R2018")
     out.header["$INSUNITS"] = doc.header.get("$INSUNITS", 1 if units == "in" else 2)
-    ensure_layers(out, mapping)
+    ensure_layers(out, mapping, review=False, background=args.keep_background)
     imp = Importer(doc, out)
     keep_entities = []
     tier_names_seen: Dict[str, int] = {}
@@ -1398,6 +1400,13 @@ def cmd_close(args) -> int:
             print_gaps(fl["label"], fit["gaps"], 0.0, 0.0, units)
     imp.import_entities(keep_entities)
     imp.finalize()
+    # The importer carries every source layer over; drop the ones left empty
+    # so the app's layer list shows only what the file holds.
+    used = {e.dxf.layer for e in out.modelspace()}
+    for layer in list(out.layers):
+        name = layer.dxf.name
+        if name not in used and name not in CANONICAL_LAYERS.values() and name not in ("0", "Defpoints"):
+            out.layers.remove(name)
     out.saveas(args.out)
     print()
     print("CANDIDATES " + ", ".join(f"{REVIEW_EDGE_PREFIX}{n}: {c}" for n, c in tier_names_seen.items()))
