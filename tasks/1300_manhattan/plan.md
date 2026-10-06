@@ -95,19 +95,20 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
   109 (9), 115 (10), 80 (11).
 - **Slab edge:** the architect's export has no closed slab edge. Revit's
   `A-FLOR` and `A-FLOR-OTLN` carry the floor edge only where it is visible
-  between walls, on the overview and the 1/8" blow-up sheets alike (about
-  half the perimeter, in 50 to 90 pieces per floor). So `prep` drafts
-  `BOUNDARY` in two steps: a raster fill of the architect's linework finds
-  where the perimeter is, then every half foot of that outline is snapped
-  onto the architect's own lines in order of trust: first the floor-edge
-  lines, balcony outlines and guardrails within 2.5 ft, then the exterior
-  wall and curtain-wall faces within 1.5 ft, and nothing else. The result
-  is the architect's slab edge wherever one was drawn, the wall face where
-  the edge is hidden under the wall, and a raster trace only where neither
-  exists. Areas: 25,280 sf (4-5), 26,894 (6), 45,374 (7), 55,153 (8),
-  58,456 (9), 56,148 (10), 56,389 (11). Balconies are inside the draft and
-  openings are not cut. Known miss: the unstriped east parking bay on the
-  7th, 14 columns outside; extend by hand.
+  between walls (about half the perimeter, in 50 to 90 pieces per floor);
+  the balcony fronts are on `A-FLOR` with the guardrail outline
+  (`A-FLOR-HRAL`) a few inches outside; where the edge is hidden under the
+  exterior wall the wall face (`A-WALL`, curtain wall, poché) is the only
+  line. So `prep` drafts `BOUNDARY` in two steps: a raster fill of the
+  linework finds where the perimeter is, then the outline is fitted exactly
+  onto the architect's lines in order of trust (`FLOR` within 2.5 ft,
+  `RAIL` 2.0, `WALL` 1.5), corners at the lines' intersections, short
+  straight bridges where the edge passes under a party wall between two
+  balconies. The candidates are written to `RV-EDGE-FLOR / RAIL / WALL`
+  and the stretches with no line to `RV-GAP`, for the engineer's pass
+  (see the skill, step 5). Balconies are inside the draft and openings are
+  not cut. Known miss: the unstriped east parking bay on the 7th, 14
+  columns outside; extend by hand.
 - **Structural walls:** the architect pochés concrete walls as hatches on
   `A-WALL-PATT`: 8 to 12 in bands on Stairs 1 to 4, the PE#1/PE#2 and SE#1
   shafts, and the garage retaining and edge walls. `auto_walls` turns each
@@ -151,10 +152,18 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
       the garage columns starting at different levels down the hill.
 - [x] Bundled as demo 5 in the web app (`manhattan_1300`, `web/api/_engine/demo/1300_manhattan.dxf`)
       with the layer guesser fixed to recognise `COL`/`COLS` on both the rules and AI paths.
+- [x] Slab edge fitted exactly onto the architect's lines, with the
+      candidates on `RV-EDGE-*` and the misses on `RV-GAP` for review;
+      `close` re-fits after the engineer's pass and writes the formatted file.
 - [ ] Get A-107, A-108, A-109; convert; re-run `prep` with all ten floors.
-- [ ] Engineer corrects the draft in AutoCAD: extend the 7th's east bay, cut
-      shaft and court openings, split balconies to `ADDITIONAL-LOAD`, put
-      shear walls on `WALL`; save as `1300_manhattan_formatted.dxf`.
+- [ ] Engineer's pass in AutoCAD on `1300_manhattan_working.dxf`: on
+      `RV-EDGE-*` delete what is not slab edge and draw the edge at each
+      `RV-GAP` (the garage's north retaining wall and the bar's north face
+      are the long ones); on `WALL` delete the poché walls that do not bear;
+      extend the 7th's east bay, cut shaft and court openings, split
+      balconies to `ADDITIONAL-LOAD`. Then
+      `dxf_prep.py close ... --out 1300_manhattan_formatted.dxf --marks ...`
+      and repeat until the gap list is acceptable.
 - [ ] `check` until READY; upload; confirm inches.
 - [ ] Compare the app's floor list and column counts against the table above.
 

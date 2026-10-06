@@ -26,10 +26,12 @@
     "close_ft": 5,
     "open_ft": 2.5,
     "snap": [
-      {"layers": ["^A-FLOR$", "^A-FLOR-OTLN$", "^A-FLOR-HRAL$"], "within_ft": 2.5},
-      {"layers": ["^A-WALL$", "^A-GLAZ$", "^A-GLAZ-CURT$", "^A-WALL-PATT$"], "within_ft": 1.5}
+      {"name": "FLOR", "layers": ["^A-FLOR$", "^A-FLOR-OTLN$"], "within_ft": 2.5, "show": "all"},
+      {"name": "RAIL", "layers": ["^A-FLOR-HRAL$"], "within_ft": 2.0, "show": "near"},
+      {"name": "WALL", "layers": ["^A-WALL$", "^A-GLAZ$", "^A-GLAZ-CURT$", "^A-WALL-PATT$"], "within_ft": 1.5, "show": "near"}
     ],
-    "_snap_note": "Tier 1 is the architect's own floor edge (Revit floor lines, balcony outlines, guardrails at open edges); tier 2 is the exterior wall face where the edge is hidden under a wall. Nothing else pulls the boundary.",
+    "_snap_note": "Tiers in order of trust; each becomes a review layer RV-EDGE-<name> in the working DXF. FLOR: the architect's floor edge (Revit floor lines, balcony outlines). RAIL: guardrail outlines at open balcony edges. WALL: the exterior wall face where the edge is hidden under a wall. The engineer deletes candidates that are not slab edge and draws missing ones, then `close` fits the loops exactly.",
+    "gap_ft": 2,
     "min_area_sf": 500
   },
   "auto_walls": {

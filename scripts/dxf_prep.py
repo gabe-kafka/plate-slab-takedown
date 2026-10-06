@@ -67,6 +67,14 @@ CANONICAL_COLORS = {
 }
 BACKGROUND_COLOR = 8  # dark grey for reference linework
 
+# Review layers written by `prep` for the engineer's pass in AutoCAD and read
+# back by `close`. RV-EDGE-<tier>: candidate slab-edge lines (delete, move or
+# draw); RV-GAP: stretches of the draft outline that lie on no candidate.
+REVIEW_EDGE_PREFIX = "RV-EDGE-"
+REVIEW_GAP_LAYER = "RV-GAP"
+REVIEW_EDGE_COLORS = (5, 171, 41, 131)  # blue, violet, olive, teal per tier
+REVIEW_GAP_COLOR = 210                  # pink
+
 STRUCTURAL_ROLES = ("boundary", "additional_load", "wall", "beam", "support_point")
 LOOP_ROLES = ("boundary", "additional_load")
 GEOMETRY_TYPES = {"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE"}
@@ -398,7 +406,6 @@ def envelope_polygons(
     min_area_sf: float,
     units: str,
     grow_ft: float = 0.0,
-    snap_tiers: List[tuple] | None = None,
 ) -> List[Polygon]:
     """Draft slab outline from architectural linework.
 
@@ -406,7 +413,8 @@ def envelope_polygons(
     to `close_ft` (dilate then erode), drop slivers thinner than `open_ft`
     (erode then dilate), and trace each filled region's outer ring. Holes
     are ignored on purpose: the engineer cuts real openings afterwards.
-    Returns polygons in source units.
+    Returns raster outlines in source units; `fit_ring` then pulls them onto
+    the architect's lines.
     """
     import numpy as np
     from PIL import Image, ImageDraw, ImageFilter
@@ -463,11 +471,7 @@ def envelope_polygons(
             poly = max(poly.geoms, key=lambda g: g.area)
         if poly.is_empty:
             continue
-        poly = Polygon(poly.exterior)
-        if snap_tiers:
-            poly = snap_ring_to_linework(poly, [(segs, d / f) for segs, d in snap_tiers], res, simplify_tol=0.6 / f)
-        else:
-            poly = poly.simplify(res / 2)
+        poly = Polygon(poly.exterior).simplify(res / 2)
         if grow_ft > 0:
             poly = Polygon(poly.buffer(grow_ft / f, join_style=2).exterior)
         if poly.area * f * f >= min_area_sf:
@@ -476,48 +480,293 @@ def envelope_polygons(
     return polys
 
 
-def snap_ring_to_linework(poly: Polygon, tiers: List[tuple], step: float, simplify_tol: float) -> Polygon:
-    """Pull a raster-traced outline onto the real drawing.
+FIT_STEP_FT = 0.25        # sample spacing along the ring while fitting
+FIT_CORNER_FT = 3.0       # two architect lines meeting within this of the ring ends make a corner
+FIT_EXTEND_FT = 0.5       # a run may overshoot its line's ends by this much before clamping
+FIT_ANGLE_DEG = 35.0      # a candidate line must run within this angle of the ring
+FIT_MIN_RUN = 2           # snapped runs shorter than this many samples are flicker
+FIT_ABSORB_FT = 2.0       # unsnapped stretches shorter than this between two lines are dropped
+FIT_BRIDGE_FT = 10.0      # ... up to this long become one straight segment between the two lines
+FIT_BRIDGE_DEV_FT = 1.0   #     if the straight segment stays this close to the traced stretch
+FIT_SIMPLIFY_FT = 0.01    # only duplicate / collinear vertices are removed
 
-    `tiers` is an ordered list of (segments, snap_dist): the traced ring is
-    walked every `step`, and each sample moves to the nearest point of the
-    first tier that has a line within its distance. With the architect's
-    floor-edge lines as tier one and the exterior wall faces as tier two,
-    the boundary is the architect's slab edge wherever one was drawn, the
-    wall face where the edge is hidden under a wall, and the raster trace
-    only where neither exists. Collinear runs collapse and leftover
-    stair-steps are smoothed with `simplify_tol`.
+
+def fit_ring(coords: Sequence[tuple], tiers: List[tuple], units: str, gap_ft: float = 2.0) -> Dict:
+    """Pull a closed outline onto the architect's lines, exactly.
+
+    `tiers` is an ordered list of (name, segments, within_ft). The ring is
+    walked every FIT_STEP_FT; each sample attaches to the nearest line of the
+    first tier that has one within reach and running along the ring (not
+    across it). A sample stays on its line while it is still beside it, so
+    two near-parallel lines do not flicker. Consecutive runs on different
+    lines meet at the lines' intersection when that lies within
+    FIT_CORNER_FT of both, else they are joined by a short jog. Each run
+    contributes exactly two vertices on its line, so the result is the
+    architect's geometry wherever a line was found. Stretches with no line
+    keep the ring's own shape and are reported as gaps.
+
+    A stretch with no line that is short and nearly straight between the
+    two lines beside it becomes one straight segment (a bridge, counted,
+    not a gap): the slab edge hidden under a party wall between two
+    balconies, for instance.
+
+    Returns {"polygon", "gaps": [{"xy", "length_ft", "coords"}], "bridges",
+    "on_ft", "total_ft"}; polygon is None when the ring collapses.
     """
     from shapely import STRtree
+    from shapely.geometry import LineString, LinearRing, Point
+
+    f = unit_factor(units)
+    step = FIT_STEP_FT / f
+    corner = FIT_CORNER_FT / f
+    extend = FIT_EXTEND_FT / f
+    absorb = FIT_ABSORB_FT / f
+    cos_lim = math.cos(math.radians(FIT_ANGLE_DEG))
+    built = []
+    for name, segments, within_ft in tiers:
+        segs = [s for s in segments if s[0] != s[1]]
+        if segs:
+            lines = [LineString(s) for s in segs]
+            built.append({"name": name, "segs": segs, "lines": lines, "tree": STRtree(lines), "dist": within_ft / f})
+    pts0 = [tuple(c[:2]) for c in coords]
+    if len(pts0) > 1 and pts0[0] == pts0[-1]:
+        pts0 = pts0[:-1]
+    if len(pts0) < 3:
+        return {"polygon": None, "gaps": [], "bridges": 0, "on_ft": 0.0, "total_ft": 0.0}
+    ring = LinearRing(pts0)
+    total = ring.length
+    if not built or total <= 0:
+        poly = Polygon(pts0).buffer(0)
+        return {"polygon": poly if not poly.is_empty else None, "gaps": [], "bridges": 0, "on_ft": 0.0, "total_ft": total * f}
+    n = max(8, int(math.ceil(total / step)))
+    pts = [ring.interpolate(i * total / n) for i in range(n)]
+
+    def seg_vec(seg):
+        return (seg[1][0] - seg[0][0], seg[1][1] - seg[0][1])
+
+    def proj_t(seg, p):
+        (ax, ay), (bx, by) = seg
+        vx, vy = bx - ax, by - ay
+        ll = vx * vx + vy * vy
+        return ((p.x - ax) * vx + (p.y - ay) * vy) / ll if ll else 0.0
+
+    def seg_pt(seg, t):
+        (ax, ay), (bx, by) = seg
+        return (ax + (bx - ax) * t, ay + (by - ay) * t)
+
+    def tangent(i):
+        a, b = pts[(i - 2) % n], pts[(i + 2) % n]
+        vx, vy = b.x - a.x, b.y - a.y
+        l = math.hypot(vx, vy)
+        return (vx / l, vy / l) if l else (1.0, 0.0)
+
+    def along(seg, tan):
+        vx, vy = seg_vec(seg)
+        l = math.hypot(vx, vy)
+        return l > 0 and abs(vx * tan[0] + vy * tan[1]) / l >= cos_lim
+
+    def beside(tier, si, p):
+        seg = tier["segs"][si]
+        e = extend / math.hypot(*seg_vec(seg))
+        return -e <= proj_t(seg, p) <= 1 + e and tier["lines"][si].distance(p) <= tier["dist"]
+
+    def best_in(ti, p, tan):
+        tier = built[ti]
+        idx = tier["tree"].query(p.buffer(tier["dist"]))
+        best, best_d = None, None
+        for j in idx:
+            j = int(j)
+            if not along(tier["segs"][j], tan):
+                continue
+            d = tier["lines"][j].distance(p)
+            if d <= tier["dist"] and (best_d is None or d < best_d):
+                best, best_d = j, d
+        return best
+
+    assign: List[tuple | None] = [None] * n
+    cur = None
+    for i, p in enumerate(pts):
+        tan = tangent(i)
+        if cur is not None and beside(built[cur[0]], cur[1], p) and along(built[cur[0]]["segs"][cur[1]], tan):
+            for tj in range(cur[0]):
+                j = best_in(tj, p, tan)
+                if j is not None:
+                    cur = (tj, j)
+                    break
+            assign[i] = cur
+            continue
+        cur = None
+        for tj in range(len(built)):
+            j = best_in(tj, p, tan)
+            if j is not None:
+                cur = (tj, j)
+                break
+        assign[i] = cur
+
+    # Runs of consecutive samples on one line, starting at a change so the
+    # cyclic sequence has no split run.
+    start = next((i for i in range(1, n) if assign[i] != assign[i - 1]), 0)
+    order = list(range(start, n)) + list(range(0, start))
+    runs: List[list] = []
+    for i in order:
+        if runs and runs[-1][0] == assign[i]:
+            runs[-1][1].append(i)
+        else:
+            runs.append([assign[i], [i]])
+    # Flicker (a line held for a sample or two) goes to the previous run;
+    # a short unsnapped stretch between two lines is dropped so the lines
+    # meet at a corner. Neighbours left on the same line are joined.
+    changed = True
+    while changed and len(runs) > 2:
+        changed = False
+        for k in range(len(runs)):
+            key, idxs = runs[k]
+            prev, nxt = runs[(k - 1) % len(runs)], runs[(k + 1) % len(runs)]
+            flicker = key is not None and len(idxs) < FIT_MIN_RUN
+            bridge = key is None and len(idxs) * step <= absorb and prev[0] is not None and nxt[0] is not None
+            if not (flicker or bridge):
+                continue
+            if flicker:
+                prev[1].extend(idxs)
+            del runs[k]
+            if prev is not nxt and prev[0] == nxt[0]:
+                prev[1].extend(nxt[1])
+                runs.remove(nxt)
+            changed = True
+            break
+    if len(runs) == 1 and runs[0][0] is None:
+        poly = Polygon(pts0).buffer(0)
+        return {"polygon": poly if not poly.is_empty else None, "gaps": [{"xy": (pts0[0][0], pts0[0][1]), "length_ft": total * f, "coords": pts0}], "bridges": 0, "on_ft": 0.0, "total_ft": total * f}
+
+    def intersect(s1, s2):
+        (x1, y1), (x2, y2) = s1
+        (x3, y3), (x4, y4) = s2
+        d = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        l1 = math.hypot(x2 - x1, y2 - y1)
+        l2 = math.hypot(x4 - x3, y4 - y3)
+        if l1 == 0 or l2 == 0 or abs(d) < 1e-3 * l1 * l2:  # parallel within ~0.06 deg
+            return None
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / d
+        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+
+    # Each snapped run contributes the two points where it enters and leaves
+    # its line (clamped to the line plus a small extension).
+    ends: List[tuple | None] = []
+    for key, idxs in runs:
+        if key is None:
+            ends.append(None)
+            continue
+        seg = built[key[0]]["segs"][key[1]]
+        e = extend / math.hypot(*seg_vec(seg))
+        t0 = min(max(proj_t(seg, pts[idxs[0]]), -e), 1 + e)
+        t1 = min(max(proj_t(seg, pts[idxs[-1]]), -e), 1 + e)
+        ends.append((seg, seg_pt(seg, t0), seg_pt(seg, t1)))
+
+    verts: List[tuple] = []
+    gaps = []
+    bridges = 0
+    on_len = 0.0
+    prev_seg = None  # line of the previous snapped run, if the last vertex lies on it
+    first_seg = None
+    R = len(runs)
+    for k, (key, idxs) in enumerate(runs):
+        if key is None:
+            stretch = [(pts[i].x, pts[i].y) for i in idxs]
+            length = len(idxs) * step
+            before, after = ends[(k - 1) % R], ends[(k + 1) % R]
+            if before is not None and after is not None and R > 2 and length <= FIT_BRIDGE_FT / f:
+                chord = LineString([before[2], after[1]])
+                if chord.length > 0 and max(chord.distance(Point(q)) for q in stretch) <= FIT_BRIDGE_DEV_FT / f:
+                    bridges += 1
+                    prev_seg = None
+                    continue  # the two lines' end points join directly
+            if len(stretch) >= 2:
+                stretch = list(LineString(stretch).simplify(step).coords)
+            verts.extend(stretch)
+            if length >= gap_ft / f:
+                mid = pts[idxs[len(idxs) // 2]]
+                gaps.append({"xy": (mid.x, mid.y), "length_ft": length * f, "coords": stretch})
+            prev_seg = None
+            continue
+        seg, a, b = ends[k]
+        on_len += len(idxs) * step
+        if prev_seg is not None and verts:
+            x = intersect(prev_seg, seg)
+            if x and math.hypot(x[0] - verts[-1][0], x[1] - verts[-1][1]) <= corner and math.hypot(x[0] - a[0], x[1] - a[1]) <= corner:
+                verts[-1] = x
+                a = None
+        if a is not None:
+            verts.append(a)
+        verts.append(b)
+        if first_seg is None and k == 0:
+            first_seg = seg
+        prev_seg = seg
+    if first_seg is not None and prev_seg is not None and len(verts) > 3:
+        x = intersect(prev_seg, first_seg)
+        if x and math.hypot(x[0] - verts[-1][0], x[1] - verts[-1][1]) <= corner and math.hypot(x[0] - verts[0][0], x[1] - verts[0][1]) <= corner:
+            verts[-1] = x
+            verts = verts[1:]
+    poly = Polygon(verts).buffer(0)
+    if poly.geom_type == "MultiPolygon":
+        poly = max(poly.geoms, key=lambda g: g.area)
+    if poly.is_empty:
+        return {"polygon": None, "gaps": gaps, "bridges": bridges, "on_ft": on_len * f, "total_ft": total * f}
+    poly = Polygon(poly.exterior).simplify(FIT_SIMPLIFY_FT / f)
+    return {"polygon": poly, "gaps": gaps, "bridges": bridges, "on_ft": on_len * f, "total_ft": total * f}
+
+
+def fit_polygons(polys: List[Polygon], tiers: List[tuple], units: str, gap_ft: float) -> tuple:
+    """fit_ring over several outlines; returns (polygons, merged fit report)."""
+    out = []
+    fit = {"gaps": [], "bridges": 0, "on_ft": 0.0, "total_ft": 0.0}
+    for poly in polys:
+        r = fit_ring(list(poly.exterior.coords), tiers, units, gap_ft)
+        if r["polygon"] is not None:
+            out.append(r["polygon"])
+            fit["gaps"].extend(r["gaps"])
+            fit["bridges"] += r["bridges"]
+            fit["on_ft"] += r["on_ft"]
+            fit["total_ft"] += r["total_ft"]
+    return out, fit
+
+
+def review_candidates(polys: List[Polygon], tiers: List[tuple], auto: Dict, units: str) -> List[tuple]:
+    """Candidate edge lines per tier for the review layers: (layer, segments).
+
+    show="all" writes every line of the tier's layers; "near" only those
+    within the tier's reach (plus a foot) of a draft outline.
+    """
     from shapely.geometry import LineString
 
-    built = []
-    for segments, dist in tiers:
-        lines = [LineString(s) for s in segments if s[0] != s[1]]
-        if lines:
-            built.append((lines, STRtree(lines), dist))
-    if not built:
-        return poly.simplify(step / 2)
-    ring = poly.exterior
-    n = max(8, int(ring.length / step))
-    snapped = []
-    for i in range(n):
-        p = ring.interpolate(i / n, normalized=True)
-        target = None
-        for lines, tree, dist in built:
-            idx = tree.query_nearest(p, max_distance=dist, return_distance=False)
-            if len(idx):
-                line = lines[int(idx[0])]
-                q = line.interpolate(line.project(p))
-                target = (q.x, q.y)
-                break
-        snapped.append(target or (p.x, p.y))
-    fixed = Polygon(snapped).buffer(0)
-    if fixed.geom_type == "MultiPolygon":
-        fixed = max(fixed.geoms, key=lambda g: g.area)
-    if fixed.is_empty:
-        return poly.simplify(step / 2)
-    return Polygon(fixed.exterior).simplify(simplify_tol)
+    f = unit_factor(units)
+    rings = [p.exterior for p in polys]
+    out = []
+    for k, (name, segs, within_ft) in enumerate(tiers):
+        show = auto["snap"][k]["show"]
+        reach = (within_ft + 1.0) / f
+        keep = []
+        for s in segs:
+            if s[0] == s[1]:
+                continue
+            if show == "all" or any(r.distance(LineString(s)) <= reach for r in rings):
+                keep.append(s)
+        out.append((REVIEW_EDGE_PREFIX + name, keep))
+    return out
+
+
+def write_gap_marks(msp, gaps: List[Dict], dx: float, dy: float, units: str) -> None:
+    r = 2.0 / unit_factor(units)
+    for g in gaps:
+        x, y = g["xy"]
+        msp.add_circle((x + dx, y + dy), r, dxfattribs={"layer": REVIEW_GAP_LAYER})
+        if len(g["coords"]) >= 2:
+            msp.add_lwpolyline([(px + dx, py + dy) for px, py in g["coords"]], format="xy", dxfattribs={"layer": REVIEW_GAP_LAYER})
+
+
+def print_gaps(label: str, gaps: List[Dict], dx: float, dy: float, units: str) -> None:
+    for g in sorted(gaps, key=lambda g: -g["length_ft"]):
+        x, y = g["xy"]
+        print(f"    gap {g['length_ft']:6.1f} ft at ({x + dx:.1f}, {y + dy:.1f}) floor {label}")
 
 
 def hatch_wall_rings(hatch, rules: Dict, units: str) -> List[List[tuple]]:
@@ -577,11 +826,20 @@ def load_map(path: str) -> Dict:
             "close_ft": float(auto.get("close_ft", 5.0)),
             "open_ft": float(auto.get("open_ft", 2.5)),
             "grow_ft": float(auto.get("grow_ft", 0.0)),
+            # Each tier becomes a review layer RV-EDGE-<name> in the working
+            # DXF; "show" is "all" (every line of those layers) or "near"
+            # (only lines within reach of the draft outline).
             "snap": [
-                {"layers": [re.compile(p, re.IGNORECASE) for p in t.get("layers", [])], "within_ft": float(t.get("within_ft", 1.5))}
-                for t in snap_raw
+                {
+                    "name": str(t.get("name", f"T{k + 1}")).upper(),
+                    "layers": [re.compile(p, re.IGNORECASE) for p in t.get("layers", [])],
+                    "within_ft": float(t.get("within_ft", 1.5)),
+                    "show": str(t.get("show", "near")).lower(),
+                }
+                for k, t in enumerate(snap_raw)
             ],
             "min_area_sf": float(auto.get("min_area_sf", 500.0)),
+            "gap_ft": float(auto.get("gap_ft", 2.0)),
         }
     walls = raw.get("auto_walls") or None
     if walls:
@@ -625,13 +883,27 @@ def classify_layer(layer: str, mapping: Dict) -> str | None:
     return None
 
 
-def ensure_layers(doc, mapping: Dict) -> None:
+def ensure_layers(doc, mapping: Dict | None) -> None:
     for role, name in CANONICAL_LAYERS.items():
         if name not in doc.layers:
             doc.layers.add(name, color=CANONICAL_COLORS.get(name, 7))
-    for ref_name in mapping["reference"]:
+    for ref_name in (mapping or {}).get("reference", {}):
         if ref_name not in doc.layers:
             doc.layers.add(ref_name, color=BACKGROUND_COLOR)
+    auto = (mapping or {}).get("auto_boundary")
+    for k, tier in enumerate(auto["snap"] if auto else []):
+        name = REVIEW_EDGE_PREFIX + tier["name"]
+        if name not in doc.layers:
+            doc.layers.add(name, color=REVIEW_EDGE_COLORS[k % len(REVIEW_EDGE_COLORS)])
+    if REVIEW_GAP_LAYER not in doc.layers:
+        doc.layers.add(REVIEW_GAP_LAYER, color=REVIEW_GAP_COLOR)
+
+
+def review_tier_name(layer: str) -> str | None:
+    """'RV-EDGE-FLOR' -> 'FLOR'; None for any other layer."""
+    if layer.upper().startswith(REVIEW_EDGE_PREFIX):
+        return layer[len(REVIEW_EDGE_PREFIX):].upper()
+    return None
 
 
 def copy_entity(msp, entity, target_layer: str, dx: float, dy: float, units: str, structural: bool) -> bool:
@@ -744,6 +1016,7 @@ def cmd_prep(args) -> int:
     common = None
     src_dir = Path(args.src) if args.src else (Path(mapping["source_dir"]) if mapping["source_dir"] else None)
     missing = []
+    resolved = []
     for floor in floors:
         src_path = Path(floor["file"])
         if not src_path.is_absolute():
@@ -754,6 +1027,14 @@ def cmd_prep(args) -> int:
         if not src_path.exists():
             missing.append(str(src_path))
             continue
+        resolved.append((floor, src_path))
+    if missing:
+        if not args.skip_missing:
+            print("ERROR: source DXF not found:\n  " + "\n  ".join(missing), file=sys.stderr)
+            print("Set 'source_dir' in the map, pass --src <dir>, or --skip-missing to build the floors in hand.", file=sys.stderr)
+            return 2
+        print(f"WARNING: skipping {len(missing)} floor(s) whose source is missing: " + ", ".join(Path(m).name for m in missing), file=sys.stderr)
+    for floor, src_path in resolved:
         doc = ezdxf.readfile(str(src_path))
         src_units = header_units(doc)
         if src_units and src_units != units:
@@ -788,14 +1069,17 @@ def cmd_prep(args) -> int:
                 continue
             if walls_rule and e.dxftype() == "HATCH" and any(p.search(layer) for p in walls_rule["hatch_layers"]):
                 wall_rings.extend(hatch_wall_rings(e, walls_rule, units))
-            if auto and e.dxftype() in {"LINE", "LWPOLYLINE", "POLYLINE", "ARC"}:
+            if auto and e.dxftype() in {"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "HATCH"}:
                 in_fill = any(p.search(layer) for p in auto["layers"])
                 tier_hits = [k for k, t in enumerate(auto["snap"]) if any(p.search(layer) for p in t["layers"])]
                 if in_fill or tier_hits:
-                    epts = flatten_vertices(e, units) if e.dxftype() == "ARC" or has_bulge(e) else entity_points(e)
-                    if is_closed(e) and epts and epts[0] != epts[-1]:
-                        epts = epts + [epts[0]]
-                    segs = [(epts[i], epts[i + 1]) for i in range(len(epts) - 1)]
+                    if e.dxftype() == "HATCH":
+                        segs = hatch_segments(e)  # poché outlines: wall faces
+                    else:
+                        epts = flatten_vertices(e, units) if e.dxftype() == "ARC" or has_bulge(e) else entity_points(e)
+                        if is_closed(e) and epts and epts[0] != epts[-1]:
+                            epts = epts + [epts[0]]
+                        segs = [(epts[i], epts[i + 1]) for i in range(len(epts) - 1)]
                     if in_fill:
                         env_segments.extend(segs)
                     for k in tier_hits:
@@ -818,12 +1102,18 @@ def cmd_prep(args) -> int:
         floor["_loose_leftover"] = len(loose_segments) - 4 * len(loose_rings) if loose_segments else 0
         floor["_auto_walls"] = wall_rings if not mapping["layers"]["wall"] else []
         floor["_auto_boundary"] = []
+        floor["_fit"] = {"gaps": [], "bridges": 0, "on_ft": 0.0, "total_ft": 0.0}
+        floor["_review"] = []
         if auto and not mapping["layers"]["boundary"]:
             env_rings.extend(loose_rings)
-            tiers = [(snap_segments[k], t["within_ft"]) for k, t in enumerate(auto["snap"])]
-            floor["_auto_boundary"] = envelope_polygons(
-                env_segments, env_rings, auto["close_ft"], auto["open_ft"], auto["min_area_sf"], units, auto["grow_ft"], tiers
+            raw = envelope_polygons(
+                env_segments, env_rings, auto["close_ft"], auto["open_ft"], auto["min_area_sf"], units, auto["grow_ft"]
             )
+            tiers = [(t["name"], snap_segments[k], t["within_ft"]) for k, t in enumerate(auto["snap"])]
+            polys, fit = fit_polygons(raw, tiers, units, auto["gap_ft"])
+            floor["_auto_boundary"] = polys
+            floor["_fit"] = fit
+            floor["_review"] = review_candidates(polys or raw, tiers, auto, units)
         def points_of(e):
             return (block_footprint(e) if e.dxftype() == "INSERT" else entity_points(e)) or []
 
@@ -843,11 +1133,8 @@ def cmd_prep(args) -> int:
         )
         sources.append({"floor": floor, "path": src_path, "doc": doc, "kept": kept, "extent": ext, "dropped": dropped})
 
-    if missing:
-        print("ERROR: source DXF not found:\n  " + "\n  ".join(missing), file=sys.stderr)
-        print("Set 'source_dir' in the map or pass --src <dir>.", file=sys.stderr)
-        return 2
     if not sources:
+        print("ERROR: no source floors read", file=sys.stderr)
         return 2
 
     # Pass 2: stack floors bottom-up with a uniform pitch so all floors keep
@@ -892,7 +1179,7 @@ def cmd_prep(args) -> int:
         rings.extend(src["floor"].get("_loose_rings", []))
         return rings
 
-    print(f"{'FLOOR':10s} {'SOURCE':24s} {'KEPT':>5s} {'DROP':>6s} {'COLS':>5s} {'FROM':>6s} {'NAMED':>5s} {'LOOSE':>5s} {'WALLS':>5s} {'BNDRY SF':>9s}  OFFSET (source units)")
+    print(f"{'FLOOR':10s} {'SOURCE':24s} {'KEPT':>5s} {'DROP':>6s} {'COLS':>5s} {'FROM':>6s} {'NAMED':>5s} {'LOOSE':>5s} {'WALLS':>5s} {'BNDRY SF':>9s} {'ON%':>5s} {'BRDG':>4s} {'GAPS':>4s}  OFFSET (source units)")
     for index, src in enumerate(sources):
         dx = -common[0] + (index * pitch if axis == "x" else 0.0)
         dy = -common[1] + (index * pitch if axis == "y" else 0.0)
@@ -940,6 +1227,13 @@ def cmd_prep(args) -> int:
                 dxfattribs={"layer": CANONICAL_LAYERS["boundary"]},
             )
             boundary_sf += poly.area * unit_factor(units) ** 2
+        for layer_name, segs in floor_meta.get("_review", []):
+            for a, b in segs:
+                msp.add_line((a[0] + dx, a[1] + dy), (b[0] + dx, b[1] + dy), dxfattribs={"layer": layer_name})
+        fit = floor_meta.get("_fit") or {}
+        write_gap_marks(msp, fit.get("gaps", []), dx, dy, units)
+        on_pct = 100.0 * fit.get("on_ft", 0.0) / fit["total_ft"] if fit.get("total_ft") else 0.0
+        n_gaps = len(fit.get("gaps", []))
         if mapping["auto_labels"] and col_rings:
             cur_labels: List[tuple] = []
             centroids = [(sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r), r) for r in col_rings]
@@ -992,9 +1286,15 @@ def cmd_prep(args) -> int:
         if datum:
             msp.add_point((float(datum[0]) + dx, float(datum[1]) + dy), dxfattribs={"layer": CANONICAL_LAYERS["datum"]})
         dropped_total = sum(src["dropped"].values())
-        print(f"{label:10s} {src['path'].name[:24]:24s} {copied:5d} {dropped_total:6d} {n_cols:5d} {col_from:>6s} {n_named:5d} {n_loose:5d} {n_walls:5d} {boundary_sf:9,.0f}  ({dx:.1f}, {dy:.1f})")
+        print(f"{label:10s} {src['path'].name[:24]:24s} {copied:5d} {dropped_total:6d} {n_cols:5d} {col_from:>6s} {n_named:5d} {n_loose:5d} {n_walls:5d} {boundary_sf:9,.0f} {on_pct:5.0f} {fit.get('bridges', 0):4d} {n_gaps:4d}  ({dx:.1f}, {dy:.1f})")
+        if args.verbose:
+            print_gaps(label, fit.get("gaps", []), dx, dy, units)
     if mapping["auto_labels"]:
         print(f"COLUMN LABELS {mapping['label_prefix']}1..{mapping['label_prefix']}{label_counter}, consistent across floors where columns stack within {CONTINUOUS_FT:.0f} ft")
+    if mapping["auto_boundary"] and not mapping["layers"]["boundary"]:
+        tiers = ", ".join(REVIEW_EDGE_PREFIX + t["name"] for t in mapping["auto_boundary"]["snap"])
+        print(f"REVIEW ON% = share of each BOUNDARY loop lying on a candidate line; BRDG = short straight joins between two lines; GAPS = stretches on none, marked on {REVIEW_GAP_LAYER}.")
+        print(f"       Candidates on {tiers}: delete what is not slab edge, draw what is missing, then: dxf_prep.py close <this file> --out <formatted.dxf> --map <map>")
 
     if args.verbose:
         print()
@@ -1009,6 +1309,108 @@ def cmd_prep(args) -> int:
     print()
     print(f"WROTE {args.out}  units={units}  pitch={fmt_ft(pitch, units)}  floors={len(sources)}")
     print(f"NEXT  open it in AutoCAD, trace/clean on the canonical layers, then: dxf_prep.py check {args.out}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# close: the engineer's reviewed working DXF -> formatted DXF
+# ---------------------------------------------------------------------------
+
+
+def cmd_close(args) -> int:
+    """Re-fit every BOUNDARY / ADDITIONAL-LOAD loop of a reviewed working
+    DXF onto the candidate lines left on the RV-EDGE-* layers, then write a
+    clean formatted DXF (review and background layers stripped)."""
+    from ezdxf.addons import Importer
+
+    mapping = load_map(args.map) if args.map else None
+    doc = ezdxf.readfile(args.dxf)
+    units = args.units or header_units(doc) or (mapping["source_units"] if mapping else "in")
+    f = unit_factor(units)
+    auto = (mapping or {}).get("auto_boundary") or {}
+    tier_cfg = {t["name"]: (k, t["within_ft"]) for k, t in enumerate(auto.get("snap", []))}
+    gap_ft = float(auto.get("gap_ft", 2.0))
+    loop_layers = {CANONICAL_LAYERS[r] for r in LOOP_ROLES}
+    floors = read_floors(doc, units)
+    if not floors:
+        print("ERROR: no FLOOR NUMBER labels; this is not a working DXF from prep", file=sys.stderr)
+        return 2
+
+    out = ezdxf.new("R2018")
+    out.header["$INSUNITS"] = doc.header.get("$INSUNITS", 1 if units == "in" else 2)
+    ensure_layers(out, mapping)
+    imp = Importer(doc, out)
+    keep_entities = []
+    tier_names_seen: Dict[str, int] = {}
+    print(f"{'FLOOR':10s} {'LOOPS':>5s} {'ON%':>5s} {'BRDG':>4s} {'GAPS':>4s} {'GAP FT':>7s} {'BNDRY SF':>9s} {'ADDL SF':>8s}")
+    marks = []
+    for fl in floors:
+        loops = []  # (layer, coords)
+        cands: Dict[str, List[tuple]] = {}
+        for e in fl["entities"]:
+            layer = e.dxf.layer
+            kind = e.dxftype()
+            tier = review_tier_name(layer)
+            if layer in loop_layers and kind in {"LWPOLYLINE", "POLYLINE"} and is_closed(e):
+                pts = flatten_vertices(e, units) if has_bulge(e) else entity_points(e)
+                if len(pts) >= 3:
+                    loops.append((layer, pts))
+                continue  # replaced by the fitted loop
+            if tier is not None:
+                if kind in {"LINE", "LWPOLYLINE", "POLYLINE", "ARC"}:
+                    pts = flatten_vertices(e, units) if kind == "ARC" or has_bulge(e) else entity_points(e)
+                    if is_closed(e) and pts and pts[0] != pts[-1]:
+                        pts = pts + [pts[0]]
+                    cands.setdefault(tier, []).extend((pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+                continue  # review layers are not part of the formatted file
+            if layer == REVIEW_GAP_LAYER:
+                continue
+            if not args.keep_background and layer.upper().startswith("BG-"):
+                continue
+            keep_entities.append(e)
+        # Tier order: as in the map, then any review layer the engineer added.
+        names = sorted(cands, key=lambda n: (tier_cfg.get(n, (99, 0))[0], n))
+        tiers = [(n, cands[n], tier_cfg.get(n, (99, 1.5))[1]) for n in names]
+        for n in names:
+            tier_names_seen[n] = tier_names_seen.get(n, 0) + len(cands[n])
+        fit = {"gaps": [], "bridges": 0, "on_ft": 0.0, "total_ft": 0.0}
+        areas = {CANONICAL_LAYERS["boundary"]: 0.0, CANONICAL_LAYERS["additional_load"]: 0.0}
+        n_loops = 0
+        for layer, pts in loops:
+            r = fit_ring(pts, tiers, units, gap_ft)
+            poly = r["polygon"]
+            if poly is None:
+                print(f"WARNING: floor '{fl['label']}': a {layer} loop collapsed while fitting; kept as drawn", file=sys.stderr)
+                poly = Polygon(pts)
+            coords = list(poly.exterior.coords)[:-1]
+            out.modelspace().add_lwpolyline(coords, format="xy", close=True, dxfattribs={"layer": layer})
+            areas[layer] += poly.area * f * f
+            n_loops += 1
+            fit["gaps"].extend(r["gaps"])
+            fit["bridges"] += r["bridges"]
+            fit["on_ft"] += r["on_ft"]
+            fit["total_ft"] += r["total_ft"]
+        marks.append((fl["label"], fit["gaps"]))
+        on_pct = 100.0 * fit["on_ft"] / fit["total_ft"] if fit["total_ft"] else 0.0
+        gap_len = sum(g["length_ft"] for g in fit["gaps"])
+        print(f"{fl['label']:10s} {n_loops:5d} {on_pct:5.0f} {fit['bridges']:4d} {len(fit['gaps']):4d} {gap_len:7.0f} {areas[CANONICAL_LAYERS['boundary']]:9,.0f} {areas[CANONICAL_LAYERS['additional_load']]:8,.0f}")
+        if args.verbose:
+            print_gaps(fl["label"], fit["gaps"], 0.0, 0.0, units)
+    imp.import_entities(keep_entities)
+    imp.finalize()
+    out.saveas(args.out)
+    print()
+    print("CANDIDATES " + ", ".join(f"{REVIEW_EDGE_PREFIX}{n}: {c}" for n, c in tier_names_seen.items()))
+    print(f"WROTE {args.out}  (review and {'' if args.keep_background else 'BG-* '}layers stripped)")
+    if args.marks:
+        mdoc = ezdxf.new("R2018")
+        mdoc.header["$INSUNITS"] = out.header["$INSUNITS"]
+        mdoc.layers.add(REVIEW_GAP_LAYER, color=REVIEW_GAP_COLOR)
+        for _, gaps in marks:
+            write_gap_marks(mdoc.modelspace(), gaps, 0.0, 0.0, units)
+        mdoc.saveas(args.marks)
+        print(f"WROTE {args.marks}  ({sum(len(g) for _, g in marks)} gap marks on {REVIEW_GAP_LAYER}; insert it over the working file)")
+    print(f"NEXT  dxf_prep.py check {args.out}")
     return 0
 
 
@@ -1512,8 +1914,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--units", choices=["in", "ft"])
     p.add_argument("--src", help="directory holding the source DXFs named in the map (overrides 'source_dir')")
     p.add_argument("--gap-ft", type=float, default=DEFAULT_STACK_GAP_FT)
-    p.add_argument("-v", "--verbose", action="store_true", help="list dropped layers")
+    p.add_argument("--skip-missing", action="store_true", help="build the floors whose source exists; warn about the rest")
+    p.add_argument("-v", "--verbose", action="store_true", help="list dropped layers and every boundary gap")
     p.set_defaults(func=cmd_prep)
+
+    p = sub.add_parser("close", help="fit the reviewed working DXF's loops onto the kept RV-EDGE-* lines and write the formatted DXF")
+    p.add_argument("dxf", help="working DXF after the engineer's pass in AutoCAD")
+    p.add_argument("--out", required=True, help="formatted DXF to upload")
+    p.add_argument("--map", help="map JSON (tier reach per RV-EDGE-* layer); default 1.5 ft")
+    p.add_argument("--units", choices=["in", "ft"])
+    p.add_argument("--marks", help="also write a small DXF holding only the RV-GAP marks for this pass")
+    p.add_argument("--keep-background", action="store_true", help="keep BG-* layers in the output")
+    p.add_argument("-v", "--verbose", action="store_true", help="list every gap with coordinates")
+    p.set_defaults(func=cmd_close)
 
     p = sub.add_parser("check", help="validate a formatted DXF against the input contract")
     p.add_argument("dxf")
