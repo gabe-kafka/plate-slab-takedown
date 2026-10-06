@@ -36,6 +36,7 @@ from geometry_utils import (  # noqa: E402
     entity_to_polygon,
     extract_entity_text,
     polygons_from_entities,
+    sanitized_floor_token,
 )
 from inspection_utils import ROLE_KEYWORDS, suggest_layers  # noqa: E402
 
@@ -953,6 +954,210 @@ def floor_sort_key(name: str):
 
 
 # ---------------------------------------------------------------------------
+# floors of a formatted/working DXF (shared by stack and render)
+# ---------------------------------------------------------------------------
+
+CONTINUOUS_FT = 1.0
+OFFSET_FT = 3.0
+
+
+def read_floors(doc, units: str, mapping: Dict | None = None) -> List[Dict]:
+    """Split a stacked DXF into floors by nearest FLOOR NUMBER label along the
+    stacking axis. Returns floors sorted bottom-up by floor_sort_key."""
+    factor = unit_factor(units)
+    msp = doc.modelspace()
+    layers = {role: role_layers(mapping, role) for role in CANONICAL_LAYERS}
+    labels = []
+    for e in msp:
+        if e.dxf.layer in layers["floor_label"] and e.dxftype() in TEXT_TYPES:
+            t = extract_entity_text(e)
+            if t:
+                labels.append({"label": t.strip(), "x": e.dxf.insert.x, "y": e.dxf.insert.y})
+    if not labels:
+        return []
+    ys = sorted(l["y"] for l in labels)
+    xs = sorted(l["x"] for l in labels)
+    axis = "y" if (ys[-1] - ys[0]) >= (xs[-1] - xs[0]) else "x"
+    floors = {l["label"]: {"label": l["label"], "label_xy": (l["x"], l["y"]), "entities": [], "columns": [], "datum": None} for l in labels}
+
+    def nearest(p):
+        return min(labels, key=lambda l: abs((p[1] if axis == "y" else p[0]) - (l["y"] if axis == "y" else l["x"])))["label"]
+
+    for e in msp:
+        kind = e.dxftype()
+        pts = entity_points(e)
+        if not pts:
+            continue
+        fl = floors[nearest(pts[0])]
+        fl["entities"].append(e)
+        layer = e.dxf.layer
+        if layer in layers["support_point"]:
+            if kind == "POINT":
+                fl["columns"].append((pts[0][0] * factor, pts[0][1] * factor))
+            elif kind in GEOMETRY_TYPES:
+                poly = entity_to_polygon(e, factor)
+                if column_footprint_ok(poly):
+                    c = poly.centroid
+                    fl["columns"].append((c.x, c.y))
+        elif layer in layers["datum"] and kind == "POINT":
+            fl["datum"] = (pts[0][0] * factor, pts[0][1] * factor)
+    out = sorted(floors.values(), key=lambda f: floor_sort_key(f["label"]))
+    for f in out:
+        f["axis"] = axis
+        f["layers"] = layers
+    return out
+
+
+def continuity(lower: Dict, upper: Dict) -> Dict:
+    """Match each upper column to the nearest lower column after datum alignment."""
+    if lower["datum"] and upper["datum"]:
+        dx = lower["datum"][0] - upper["datum"][0]
+        dy = lower["datum"][1] - upper["datum"][1]
+        how = "datum"
+    else:
+        dx = (lower["label_xy"][0] - upper["label_xy"][0]) * 0  # no x shift without datum
+        dy = 0.0
+        how = "none"
+    res = {"how": how, "continuous": 0, "offset": 0, "unsupported": [], "stops": []}
+    if not lower["columns"] or not upper["columns"]:
+        res["unsupported"] = list(upper["columns"])
+        res["stops"] = list(lower["columns"])
+        return res
+    used = set()
+    for ux, uy in upper["columns"]:
+        ax, ay = ux + dx, uy + dy
+        j, d = min(((j, math.hypot(ax - lx, ay - ly)) for j, (lx, ly) in enumerate(lower["columns"])), key=lambda t: t[1])
+        if d <= CONTINUOUS_FT:
+            res["continuous"] += 1
+            used.add(j)
+        elif d <= OFFSET_FT:
+            res["offset"] += 1
+            used.add(j)
+        else:
+            res["unsupported"].append((ux, uy))
+    for j, (lx, ly) in enumerate(lower["columns"]):
+        if j in used:
+            continue
+        ax, ay = lx - dx, ly - dy
+        d = min(math.hypot(ax - ux, ay - uy) for ux, uy in upper["columns"])
+        if d > OFFSET_FT:
+            res["stops"].append((lx, ly))
+    return res
+
+
+def cmd_stack(args) -> int:
+    mapping = load_map(args.map) if args.map else None
+    doc = ezdxf.readfile(args.dxf)
+    units = args.units or (mapping["source_units"] if mapping else None) or header_units(doc) or "in"
+    floors = read_floors(doc, units, mapping)
+    if len(floors) < 2:
+        print("need at least two labelled floors")
+        return 1
+    rows = []
+    print(f"{'LOWER':8s} {'UPPER':8s} {'ALIGN':6s} {'LO':>4s} {'UP':>4s} {'CONT':>5s} {'OFFS':>5s} {'NEW':>4s} {'STOP':>5s}  NEW = upper column with nothing within {OFFSET_FT:.0f} ft below; STOP = lower column with nothing above")
+    for lo, up in zip(floors, floors[1:]):
+        c = continuity(lo, up)
+        rows.append({"lower": lo["label"], "upper": up["label"], **{k: (len(v) if isinstance(v, list) else v) for k, v in c.items()}, "unsupported_xy": c["unsupported"], "stops_xy": c["stops"]})
+        print(f"{lo['label']:8s} {up['label']:8s} {c['how']:6s} {len(lo['columns']):4d} {len(up['columns']):4d} {c['continuous']:5d} {c['offset']:5d} {len(c['unsupported']):4d} {len(c['stops']):5d}")
+    if args.json:
+        Path(args.json).write_text(json.dumps(rows, indent=1), encoding="utf-8")
+        print(f"wrote {args.json}")
+    return 0
+
+
+def cmd_render(args) -> int:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection, PolyCollection
+
+    mapping = load_map(args.map) if args.map else None
+    doc = ezdxf.readfile(args.dxf)
+    units = args.units or (mapping["source_units"] if mapping else None) or header_units(doc) or "in"
+    factor = unit_factor(units)
+    floors = read_floors(doc, units, mapping)
+    if not floors:
+        print("no FLOOR NUMBER labels found")
+        return 1
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cont_up = {}
+    cont_down = {}
+    for lo, up in zip(floors, floors[1:]):
+        c = continuity(lo, up)
+        cont_up[up["label"]] = c["unsupported"]
+        cont_down[lo["label"]] = c["stops"]
+    role_style = {
+        "boundary": ("#c81e1e", 1.6), "additional_load": ("#b01ea6", 1.2), "wall": ("#0e8a9a", 1.4), "beam": ("#d9731a", 1.0),
+    }
+    written = []
+    for fl in floors:
+        segs: Dict[str, List] = defaultdict(list)
+        cols = []
+        texts = []
+        layers = fl["layers"]
+        role_of = {name: role for role, names in layers.items() for name in names}
+        for e in fl["entities"]:
+            layer = e.dxf.layer
+            kind = e.dxftype()
+            role = role_of.get(layer)
+            key = role or ("hint" if layer.upper().endswith("HINT") else "bg")
+            if role == "support_point" and kind in GEOMETRY_TYPES:
+                poly = entity_to_polygon(e, factor)
+                if column_footprint_ok(poly):
+                    cols.append([(x / factor, y / factor) for x, y in poly.exterior.coords])
+                    continue
+            if role in {"column_label", "floor_label"} and kind in TEXT_TYPES:
+                texts.append((extract_entity_text(e), e.dxf.insert.x, e.dxf.insert.y, role))
+                continue
+            if kind == "LINE":
+                segs[key].append([(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)])
+            elif kind in {"LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE"}:
+                pts = flatten_vertices(e, units) if kind in {"ARC", "CIRCLE"} or has_bulge(e) else entity_points(e)
+                if is_closed(e) and pts and pts[0] != pts[-1]:
+                    pts = pts + [pts[0]]
+                segs[key].extend([[pts[i], pts[i + 1]] for i in range(len(pts) - 1)])
+        spts = [p for ring in cols for p in ring] + [p for k in role_style if k in segs for s in segs[k] for p in s]
+        ext = bbox_of(spts) or bbox_of([p for k in segs for s in segs[k] for p in s])
+        if ext is None:
+            continue
+        pad = 0.08 * max(ext[2] - ext[0], ext[3] - ext[1], 1)
+        w_in = min(30, max(12, (ext[2] - ext[0]) / (ext[3] - ext[1] + 1e-9) * 12))
+        fig, ax = plt.subplots(figsize=(w_in, 12), dpi=args.dpi)
+        if segs["bg"]:
+            ax.add_collection(LineCollection(segs["bg"], colors="#b8b8b8", linewidths=0.25))
+        if segs["hint"]:
+            ax.add_collection(LineCollection(segs["hint"], colors="#2d6fd6", linewidths=0.8))
+        for role, (color, lw) in role_style.items():
+            if segs[role]:
+                ax.add_collection(LineCollection(segs[role], colors=color, linewidths=lw))
+        if cols:
+            ax.add_collection(PolyCollection(cols, facecolors="#f2b705", edgecolors="black", linewidths=0.6))
+        for x, y in cont_up.get(fl["label"], []):
+            ax.plot(x / factor, y / factor, "o", ms=14, mfc="none", mec="#c81e1e", mew=2)
+        for x, y in cont_down.get(fl["label"], []):
+            ax.plot(x / factor, y / factor, "s", ms=14, mfc="none", mec="#0e8a9a", mew=2)
+        if fl["datum"]:
+            ax.plot(fl["datum"][0] / factor, fl["datum"][1] / factor, "+", ms=18, mew=2.5, color="#c81e1e")
+        for t, x, y, role in texts:
+            ax.annotate(t, (x, y), fontsize=14 if role == "floor_label" else 6, color="#1a7f2e" if role == "floor_label" else "black", weight="bold" if role == "floor_label" else "normal")
+        ax.set_xlim(ext[0] - pad, ext[2] + pad)
+        ax.set_ylim(ext[1] - pad, ext[3] + pad)
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        n_new = len(cont_up.get(fl["label"], []))
+        n_stop = len(cont_down.get(fl["label"], []))
+        ax.set_title(f"floor {fl['label']}: {len(cols)} columns; red ring = no column within {OFFSET_FT:.0f} ft on the floor below ({n_new}); teal square = no column above ({n_stop}); + = datum", fontsize=10)
+        name = out_dir / f"floor_{sanitized_floor_token(fl['label'])}.png"
+        fig.savefig(name, bbox_inches="tight", pad_inches=0.05)
+        plt.close(fig)
+        written.append(name)
+        print(f"{fl['label']:8s} columns={len(cols):4d} new={n_new:3d} stops={n_stop:3d} -> {name}")
+    return 0 if written else 1
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -983,6 +1188,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--map", help="map JSON if the file does not use canonical layer names")
     p.add_argument("--units", choices=["in", "ft"])
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("stack", help="column continuity between adjacent floors (datum-aligned)")
+    p.add_argument("dxf")
+    p.add_argument("--map")
+    p.add_argument("--units", choices=["in", "ft"])
+    p.add_argument("--json", help="also write per-pair results with column coordinates")
+    p.set_defaults(func=cmd_stack)
+
+    p = sub.add_parser("render", help="one PNG per floor for visual review")
+    p.add_argument("dxf")
+    p.add_argument("--out-dir", required=True)
+    p.add_argument("--map")
+    p.add_argument("--units", choices=["in", "ft"])
+    p.add_argument("--dpi", type=int, default=110)
+    p.set_defaults(func=cmd_render)
 
     args = parser.parse_args(argv)
     return args.func(args)
