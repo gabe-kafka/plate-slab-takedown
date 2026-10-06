@@ -134,6 +134,13 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
       with draft `BOUNDARY` and consistent `COL-LABEL`; `check` is READY.
 - [x] Run the engine locally on it (`scripts/run_engine_local.py`) for a
       first-pass tributary DXF and takedown XLSX.
+- [x] Put it through the live web app: upload
+      `tasks/1300_manhattan/out/1300_manhattan_upload.dxf` (the working
+      file minus `BG-*`, 0.4 MB), tick COLS under Columns/Points (the AI
+      layer pick wrongly puts it under Walls), Inches, Compute. Result:
+      completed, 0 warnings, 8 floors from 7 plans, 670 columns, datum 7/7,
+      36 s. The Iso view shows the bar's columns running full height and
+      the garage columns starting at different levels down the hill.
 - [ ] Get A-107, A-108, A-109; convert; re-run `prep` with all ten floors.
 - [ ] Engineer corrects the draft in AutoCAD: extend the 7th's east bay, cut
       shaft and court openings, split balconies to `ADDITIONAL-LOAD`, put
