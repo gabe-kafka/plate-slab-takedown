@@ -7,6 +7,12 @@
 - Name a file or command only when the reader has to go there.
 - Questions to the user: one at a time, with a recommended answer.
 
+## Vercel
+
+- Project `conc-slab-tributary-area-public` under team `gabe-kafkas-projects`, Git-connected to this repo, production branch `main`, root directory `web`.
+- Deploys, redeploys and rollbacks are routine: do them when the work calls for it, verify on the live site.
+- Environment variables, domains and deployment protection: ask first.
+
 ## Project map
 
 - `web/`: the Next.js app and its Python engine (`web/api/_engine/`). Deployed to Vercel from `main`, root directory `web`.
