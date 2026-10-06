@@ -11,3 +11,6 @@ web/node_modules/
 web/.next/
 .vercel/
 .vercel
+
+# generated DXF outputs and converted source drawings
+tasks/*/out/

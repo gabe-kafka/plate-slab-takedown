@@ -1,0 +1,38 @@
+{
+  "_comment": "1300 Manhattan Ave (CPA 23-037A). Sources are DXF exports of the OVERVIEW sheets A-100..A-109 only; the a/b sheets are the same model cropped to one section. Set source_dir to the folder holding the exported DXFs or pass --src.",
+  "source_units": "in",
+  "source_dir": "tasks/1300_manhattan/out/src",
+  "layers": {
+    "boundary": [],
+    "additional_load": [],
+    "wall": [],
+    "beam": [],
+    "support_point": ["S-COLS"],
+    "column_label": [],
+    "floor_label": [],
+    "datum": []
+  },
+  "reference": {
+    "BG-ARCH": ["^A-WALL$", "^I-WALL$", "^A-GLAZ$", "^A-GLAZ-CURT$", "^A-DOOR$", "^S-STRS$", "^S-STRS-MBND$", "^A-ANNO-MATC$"],
+    "BG-HINT": ["^A-FLOR", "^S-FNDN$", "^C-PROP-LINE$"],
+    "BG-PARK": ["^C-PRKG$"],
+    "BG-NOTES": ["^A-AREA-IDEN$", "^G-ANNO-TEXT$", "^G-ANNO-DIMS$", "^S-STRS-IDEN$"]
+  },
+  "explode_blocks": true,
+  "datum_xy": [-11089.5, -6829.4],
+  "_datum_note": "Insert point of the PE#1 elevator label; identical on every sheet A-100..A-106. If the engineer cuts the elevator shaft out of BOUNDARY as an opening, move this a few feet onto the corridor slab (same offset on every floor is automatic).",
+  "stack": {"axis": "y", "gap_ft": 60},
+  "label_height_ft": 8,
+  "floors": [
+    {"file": "A-108.dxf", "label": "1"},
+    {"file": "A-107.dxf", "label": "2-3"},
+    {"file": "A-106.dxf", "label": "4-5"},
+    {"file": "A-105.dxf", "label": "6"},
+    {"file": "A-104.dxf", "label": "7"},
+    {"file": "A-103.dxf", "label": "8"},
+    {"file": "A-102.dxf", "label": "9"},
+    {"file": "A-101.dxf", "label": "10"},
+    {"file": "A-100.dxf", "label": "11"},
+    {"file": "A-109.dxf", "label": "ROOF"}
+  ]
+}
