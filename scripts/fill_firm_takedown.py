@@ -1,0 +1,315 @@
+"""Put the engine's tributary takedown into the firm's column load takedown workbook.
+
+The firm's workbook (the 1025 Atlantic lineage: MASTER TRIB / MASTER FASCADE /
+MASTER_KLL grids, C-BASE floor list, one C-(n) sheet per column that pulls its
+row n+1 letter from the masters, and a Column Schedule) does the load combos,
+reduction and column checks itself. This script only feeds it:
+
+  MASTER TRIB, MASTER FASCADE, MASTER_KLL   column numbers across, slabs down
+  C-BASE                                   elevations, floor labels, f'c, slab thickness
+  C-(n)                                    one sheet per column (cloned from C-(1)),
+                                           per-level SDL / facade psf / live load
+  Column Schedule                          one copy per 25 columns
+  NOTES                                    column map and the assumptions used
+
+usage: python scripts/fill_firm_takedown.py <engine column_load_takedown.xlsx>
+           <firm template .xlsm/.xlsx> <levels.json> <out.xlsm>
+
+levels.json: see tasks/1300_manhattan/takedown_levels.json. Levels are listed
+top-down and land on C-BASE rows 93, 94, ...; the slab at a level is taken from
+the engine floor named by slab_from. Each column segment carries the slab one
+level up, as the firm's sheet is wired (C-(n) row r reads master row r-92).
+"""
+import json
+import math
+import re
+import sys
+from copy import copy
+from pathlib import Path
+
+import openpyxl
+from openpyxl.formatting.formatting import ConditionalFormattingList
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter as L
+from openpyxl.worksheet.formula import ArrayFormula
+
+BASE_ROW = 93          # C-BASE / C-(n) row of the top level
+MASTER_FIRST_ROW = 2   # master row of the top slab (= BASE_ROW + 1 - 92)
+ROW_TO_MASTER = BASE_ROW + 1 - MASTER_FIRST_ROW  # C-(n) row r reads master row r - 92
+LAST_ROW = 113
+SCHEDULE_WIDTH = 25
+MASTER_REF = re.compile(
+    r"((?:'MASTER TRIB'|'MASTER FASCADE'|MASTER_KLL)!)(\$?)([A-Z]{1,3})(\$?\d+)(?::(\$?)([A-Z]{1,3})(\$?\d+))?"
+)
+
+YELLOW = PatternFill("solid", fgColor="FFFF00")
+F_NOTE = Font(name="Arial", size=9, italic=True, color="555555")
+F_BOLD = Font(name="Arial", size=10, bold=True)
+F_NORM = Font(name="Arial", size=10)
+
+
+def label_key(lab):
+    m = re.fullmatch(r"C(\d+)", str(lab))
+    return (0, int(m.group(1))) if m else (1, str(lab))
+
+
+def read_grid(ws):
+    """Engine master sheet -> {floor: {label: value}}, labels in header order."""
+    labels = [c.value for c in ws[1]][1:]
+    grid = {}
+    for r in range(2, ws.max_row + 1):
+        floor = ws.cell(r, 1).value
+        if floor is None:
+            continue
+        grid[str(floor)] = {lab: ws.cell(r, i + 2).value for i, lab in enumerate(labels) if lab is not None}
+    return labels, grid
+
+
+def put(ws, r, c, v):
+    """ws.cell(r, c, None) leaves the cell alone; this always assigns."""
+    ws.cell(r, c).value = v
+
+
+def set_formula(cell, text):
+    v = cell.value
+    if isinstance(v, ArrayFormula):
+        cell.value = ArrayFormula(v.ref, text)
+    else:
+        cell.value = text
+
+
+def retarget_masters(ws, letter):
+    """Point every master reference in ws at column `letter` of the masters."""
+    def sub(m):
+        rng = ""
+        if m.group(6):
+            rng = f":{m.group(5)}{letter}{m.group(7)}"
+        return f"{m.group(1)}{m.group(2)}{letter}{m.group(4)}{rng}"
+
+    for row in ws.iter_rows():
+        for c in row:
+            v = c.value
+            text = v.text if isinstance(v, ArrayFormula) else v
+            if isinstance(text, str) and "MASTER" in text:
+                new = MASTER_REF.sub(sub, text)
+                if new != text:
+                    set_formula(c, new)
+
+
+def clone_sheet(wb, src, title, before):
+    """copy_worksheet plus the pieces it leaves behind (conditional formats,
+    view, print setup), inserted before sheet `before`."""
+    dst = wb.copy_worksheet(src)
+    dst.title = title
+    dst.conditional_formatting = ConditionalFormattingList()
+    for rng in src.conditional_formatting:
+        for rule in rng.rules:
+            dst.conditional_formatting.add(str(rng.sqref), copy(rule))
+    dst.sheet_view.zoomScale = src.sheet_view.zoomScale
+    dst.sheet_view.showGridLines = src.sheet_view.showGridLines
+    dst.freeze_panes = src.freeze_panes
+    if src.print_area:
+        dst.print_area = src.print_area.split("!")[-1]
+    if src.print_title_rows:
+        dst.print_title_rows = src.print_title_rows
+    dst.sheet_properties.pageSetUpPr = copy(src.sheet_properties.pageSetUpPr)
+    wb._sheets.remove(dst)
+    wb._sheets.insert(wb._sheets.index(before), dst)
+    return dst
+
+
+def fill_master(ws, title_a1, numbers, slabs, values, assumed):
+    """Clear the grid and write header, slab rows and values (None stays blank)."""
+    for row in ws.iter_rows(min_row=1, max_row=max(ws.max_row, 40), max_col=max(ws.max_column, len(numbers) + 1)):
+        for c in row:
+            c.value = None
+            c.fill = PatternFill()
+    ws["A1"] = title_a1
+    for j, n in enumerate(numbers):
+        ws.cell(1, j + 2, str(n))
+    for i, slab in enumerate(slabs):
+        r = MASTER_FIRST_ROW + i
+        ws.cell(r, 1, slab)
+        for j, n in enumerate(numbers):
+            v = values[i][j]
+            if v is not None:
+                ws.cell(r, j + 2, v)
+        if assumed[i]:
+            for j in range(len(numbers) + 1):
+                ws.cell(r, j + 1).fill = YELLOW
+    ws.cell(MASTER_FIRST_ROW + len(slabs) + 1, 1,
+            "Yellow rows: level not in the drawing set, areas of the engine floor named in NOTES stand in.").font = F_NOTE
+
+
+def main(argv):
+    if len(argv) != 4:
+        print(__doc__)
+        return 2
+    engine_path, template_path, levels_path, out_path = map(Path, argv)
+    cfg = json.loads(levels_path.read_text(encoding="utf-8"))
+    levels = cfg["levels"]
+    fc = cfg.get("fc_ksi", 6)
+    fy = cfg.get("fy_ksi", 60)
+    facade_psf = cfg.get("facade_psf", 35)
+    kll_default = cfg.get("kll_default", 4)
+
+    # ------------------------------------------------------------ engine data
+    ewb = openpyxl.load_workbook(engine_path, data_only=True)
+    trib_labels, trib = read_grid(ewb["MASTER TRIBUTARY AREA"])
+    _, fasc = read_grid(ewb["FASCADE LENGTH"])
+    _, kll = read_grid(ewb["MASTER KLL"])
+    labels = sorted([lab for lab in trib_labels if lab is not None], key=label_key)
+    numbers = list(range(1, len(labels) + 1))
+    floors_of = {lab: [f for f in trib if trib[f].get(lab) is not None] for lab in labels}
+    for f in {lv["slab_from"] for lv in levels if lv.get("slab_from")}:
+        if f not in trib:
+            raise SystemExit(f"levels.json names engine floor {f!r}; the engine has {sorted(trib)}")
+
+    # Slabs carried: every level but the bottom one (the firm's sheet charges a
+    # segment with the slab one level up; the bottom slab loads no column).
+    slabs = levels[:-1]
+
+    def slab_value(grid, lv, lab, default=None, as_int=True):
+        f = lv.get("slab_from")
+        if not f:
+            return None
+        v = grid.get(f, {}).get(lab)
+        if v is None:
+            return default if trib[f].get(lab) is not None else None
+        return int(math.ceil(v)) if as_int else v
+
+    trib_vals = [[slab_value(trib, lv, lab) for lab in labels] for lv in slabs]
+    fasc_vals = [[slab_value(fasc, lv, lab, default=0) for lab in labels] for lv in slabs]
+    kll_vals = [[slab_value(kll, lv, lab, default=kll_default) for lab in labels] for lv in slabs]
+    assumed = [bool(lv.get("assumed")) for lv in slabs]
+    slab_names = ["BULKHEAD" if lv["level"] == "BLKH" else lv["level"] for lv in slabs]
+
+    # --------------------------------------------------------------- template
+    wb = openpyxl.load_workbook(template_path, keep_vba=template_path.suffix.lower() == ".xlsm")
+    fill_master(wb["MASTER TRIB"], "SLAB ", numbers, slab_names, trib_vals, assumed)
+    fill_master(wb["MASTER FASCADE"], "Floor", numbers, slab_names, fasc_vals, assumed)
+    fill_master(wb["MASTER_KLL"], "SLAB ", numbers, slab_names, kll_vals, assumed)
+
+    # C-BASE: one row per level from BASE_ROW down; rows past the list go blank.
+    cb = wb["C-BASE"]
+    for i in range(LAST_ROW - BASE_ROW + 1):
+        r = BASE_ROW + i
+        if i < len(levels):
+            lv = levels[i]
+            put(cb, r, 2, lv["elev"])                 # ELEVATION
+            put(cb, r, 5, lv["level"])                # FLOOR label
+            put(cb, r, 10, fc)                        # f'c
+            put(cb, r, 11, fy)                        # fy
+            carried = levels[i - 1] if i > 0 else None  # slab this segment carries
+            put(cb, r, 14, carried.get("slab_in", 8) if carried and carried.get("slab_from") else 0)
+        else:
+            put(cb, r, 2, None)
+            put(cb, r, 5, None)
+
+    # C-(n): per-level inputs on the base sheet, then clone for every column.
+    base = wb["C-(1)"]
+    for i in range(LAST_ROW - BASE_ROW + 1):
+        r = BASE_ROW + i
+        carried = levels[i - 1] if 0 < i < len(levels) else None
+        if carried and carried.get("slab_from"):
+            put(base, r, 17, carried.get("sdl", 20))         # Q  SUPERIMPOSED DEAD LOAD (PSF)
+            put(base, r, 18, carried.get("facade_psf", facade_psf))  # R  FACADE LOAD (PSF)
+            put(base, r, 19, 0)                               # S  TRANS LOAD DL
+            put(base, r, 20, carried.get("ll", 40))          # T  LIVE LOAD (PSF)
+            put(base, r, 21, 0)                               # U  TRANS LL
+            put(base, r, 24, 0)                               # X  W (COMP)
+            put(base, r, 25, 0)                               # Y  W (TEN)
+        else:
+            for col in (17, 18, 19, 20, 21, 24, 25):
+                put(base, r, col, None)
+    retarget_masters(base, L(2))
+
+    existing = {ws.title: ws for ws in wb.worksheets if re.fullmatch(r"C-\(\d+\)", ws.title)}
+    tail = wb["Tie Spacing Based 7.10.5"] if "Tie Spacing Based 7.10.5" in wb.sheetnames else wb.worksheets[-1]
+    # drop template column sheets beyond the first: they are re-cloned from C-(1)
+    for title, ws in existing.items():
+        if title != "C-(1)":
+            wb.remove(ws)
+    for n in numbers[1:]:
+        ws = clone_sheet(wb, base, f"C-({n})", tail)
+        retarget_masters(ws, L(n + 1))
+
+    # Column Schedule: 25 columns per sheet, floor labels read from the sheets.
+    sched = wb["Column Schedule"]
+    sched_cols = [c for c in range(16, sched.max_column + 1, 2) if isinstance(sched.cell(4, c).value, (int, str))
+                  and str(sched.cell(4, c).value).isdigit()]
+    for r in range(5, 86, 4):  # floor label rows 5, 9, ..., 85
+        if r > 9:              # 5 and 9 are the template's BULKHEAD / ROOF literals
+            ref = f'INDIRECT("\'"&P$1&"\'!"&$B{r})'
+            sched.cell(r, 14, f'=IF({ref}=0,"",{ref})')
+    if sched["O5"].value:
+        sched["O5"] = f"{int(fc * 1000)} PSI"
+    pages = math.ceil(len(numbers) / SCHEDULE_WIDTH)
+    for p in range(pages):
+        first = p * SCHEDULE_WIDTH + 1
+        last = min(first + SCHEDULE_WIDTH - 1, len(numbers))
+        ws = sched if p == 0 else clone_sheet(wb, sched, f"Column Schedule {first}-{last}", wb["MASTER TRIB"])
+        for k, c in enumerate(sched_cols):
+            n = first + k
+            put(ws, 4, c, str(n) if n <= last else None)
+            if n > last:
+                put(ws, 1, c, None)
+    if pages > 1:
+        sched.title = f"Column Schedule 1-{min(SCHEDULE_WIDTH, len(numbers))}"
+
+    # NOTES
+    notes = wb.create_sheet("NOTES", 0)
+    notes.sheet_view.showGridLines = False
+    notes.column_dimensions["A"].width = 14
+    notes.column_dimensions["B"].width = 22
+    notes.column_dimensions["C"].width = 16
+    for col in "DEFGH":
+        notes.column_dimensions[col].width = 12
+    notes.column_dimensions["I"].width = 90
+    r = 1
+    notes.cell(r, 1, f"{cfg.get('project', '')} - COLUMN LOAD TAKEDOWN").font = Font(name="Arial", size=12, bold=True)
+    r += 1
+    notes.cell(r, 1, f"Tributary areas, facade lengths and KLL from the tributary engine on {cfg.get('set', '')}; "
+                     f"filled into the firm's takedown template by scripts/fill_firm_takedown.py. "
+                     f"Yellow = assumption to confirm. Column sizes are the template's defaults; set them in each C-(n) sheet.").font = F_NOTE
+    r += 2
+    for j, h in enumerate(["Level", "Elev (ft)", "Slab from floor", "Assumed", "Slab (in)", "SDL (psf)", "LL (psf)", "Facade (psf)", "Note"]):
+        notes.cell(r, j + 1, h).font = F_BOLD
+    r += 1
+    for lv in levels:
+        vals = [lv["level"], lv.get("elev"), lv.get("slab_from"), "yes" if lv.get("assumed") else "", lv.get("slab_in"),
+                lv.get("sdl"), lv.get("ll"), lv.get("facade_psf", facade_psf) if lv.get("slab_from") else None, lv.get("note", "")]
+        for j, v in enumerate(vals):
+            c = notes.cell(r, j + 1, v)
+            c.font = F_NORM
+            if lv.get("assumed"):
+                c.fill = YELLOW
+        r += 1
+    r += 1
+    notes.cell(r, 1, f"f'c {fc} ksi, fy {fy} ksi on every level (C-BASE). KLL default {kll_default} where the engine gives none. "
+                     f"The bottom level's slab ({levels[-1]['level']}) is not carried by any column segment; add a level below it if there is a cellar.").font = F_NOTE
+    r += 2
+    for j, h in enumerate(["Column", "Engine label", "Floors with slab", "", "", "", "", "", "Note"]):
+        notes.cell(r, j + 1, h).font = F_BOLD
+    r += 1
+    for n, lab in zip(numbers, labels):
+        notes.cell(r, 1, n).font = F_NORM
+        notes.cell(r, 2, lab).font = F_NORM
+        fl = sorted(floors_of[lab], key=lambda f: -float(re.sub(r"\D", "", f) or 0))
+        notes.cell(r, 3, ", ".join(fl)).font = F_NORM
+        notes.cell(r, 3).alignment = Alignment(horizontal="left")
+        if "UNLABELED" in str(lab):
+            notes.cell(r, 9, "No column tag in the drawings; numbered after the tagged columns.").font = F_NOTE
+        r += 1
+
+    wb.active = wb.sheetnames.index("NOTES")
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = ws.title == "NOTES"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out_path)
+    print(f"{out_path}: {len(numbers)} columns, {len(levels)} levels, {pages} schedule page(s), {len(wb.sheetnames)} sheets")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

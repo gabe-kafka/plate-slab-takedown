@@ -179,6 +179,17 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
       2 % steel: 14x24 carries 115 of the 123 column lines at the base, five
       need 14x30, the architect's 14x36 is never governed by axial load.
       Re-run after the engineer's pass and when A-107/108/109 arrive.
+- [x] Loads in the firm's own takedown workbook:
+      `tasks/1300_manhattan/1300_MANHATTAN_COLUMN_LOAD_TAKEDOWN.xlsm`, built by
+      `scripts/fill_firm_takedown.py` from the engine's takedown XLSX, the
+      1025 Atlantic takedown as template (newest MASTER TRIB-style workbook in
+      the Drive, 2026-06-22) and `takedown_levels.json` (elevations from
+      A-200, slab from which engine floor, SDL / LL / slab thickness per
+      level). 133 columns: C1 to C117 keep their numbers, the 16 untagged
+      garage columns are 118 to 133 (map in NOTES). Levels 1 to 3 and ROOF
+      stand in from the 4th and 11th (yellow). Column sizes are the template's
+      12x24 default until the engineer sets them. Re-run with the same command
+      after the engineer's RV-* pass or new sheets.
 - [ ] Compare the app's floor list and column counts against the table above.
 
 ## Open questions

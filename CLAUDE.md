@@ -20,6 +20,7 @@
 - `scripts/run_engine_local.py`: run the engine on a formatted DXF locally.
 - `scripts/precompute_demos.py`: runs the engine on every bundled demo and writes `web/public/demos/<slug>/` (result.json, output DXF, XLSX) so `/demo/<slug>` opens instantly; re-run after changing a demo DXF or the engine, then commit the outputs.
 - `scripts/prelim_column_sizing.py`: engine workspace to a preliminary column sizing workbook (loads, ASCE 7 reduction, ACI axial capacity, recommended sections); recalculate with the xlsx skill's `recalc.py` after building.
+- `scripts/fill_firm_takedown.py`: engine takedown XLSX + the firm's column load takedown template (.xlsm, MASTER TRIB / MASTER FASCADE / MASTER_KLL lineage) + a levels JSON (`tasks/<project>/takedown_levels.json`) → the firm's workbook with one C-(n) sheet per column and the loads calculated by its own formulas. The template is firm property and is not in the repo; pass a local copy. Recalculate a copy with `recalc.py` to check it.
 - `canonical-docs/INPUT_DXF_CONTRACT.md`: what the engine reads.
 - `.claude/skills/format-dxf/`: the drafting process.
 - `tasks/<project>/`: per-project map, plan and outputs (`out/` is ignored).
