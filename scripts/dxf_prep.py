@@ -462,6 +462,17 @@ def envelope_polygons(
     for ring in outer_rings(im):
         if len(ring) >= 3:
             sdraw.polygon([(float(px), float(py)) for px, py in ring], fill=255)
+    # A ring that pinches through a touch point (a balcony outline hanging
+    # off the facade line) leaves its sub-loop unfilled under the even-odd
+    # rule, so fill every enclosed hole explicitly: a dark region whose
+    # boundary never reaches the image border is inside.
+    inv = (np.array(solid) <= 127).astype(float)
+    gen = contourpy.contour_generator(z=inv, fill_type="OuterOffset")
+    points, offsets = gen.filled(0.5, 1.5)
+    for arr, offs in zip(points, offsets):
+        ring = arr[offs[0]:offs[1]]
+        if len(ring) >= 3 and ring[:, 0].min() > 0 and ring[:, 1].min() > 0 and ring[:, 0].max() < W - 1 and ring[:, 1].max() < H - 1:
+            sdraw.polygon([(float(px), float(py)) for px, py in ring], fill=255)
     if open_ft > 0:
         solid = solid.filter(ImageFilter.MinFilter(k(open_ft))).filter(ImageFilter.MaxFilter(k(open_ft)))
     polys = []
@@ -702,6 +713,17 @@ def fit_ring(coords: Sequence[tuple], tiers: List[tuple], units: str, gap_ft: fl
             length = len(idxs) * step
             before, after = ends[(k - 1) % R], ends[(k + 1) % R]
             if before is not None and after is not None and R > 2 and length <= FIT_BRIDGE_FT / f:
+                # Corner first: the two lines meet near the stretch (the raster
+                # rounds every corner, inside and outside), so the outline
+                # turns at their intersection.
+                x = intersect(before[0], after[0])
+                reach = length + corner
+                if x and math.hypot(x[0] - before[2][0], x[1] - before[2][1]) <= reach and math.hypot(x[0] - after[1][0], x[1] - after[1][1]) <= reach:
+                    elbow = LineString([before[2], x, after[1]])
+                    if max(elbow.distance(Point(q)) for q in stretch) <= FIT_BRIDGE_DEV_FT / f:
+                        verts.append(x)
+                        prev_seg = None
+                        continue
                 chord = LineString([before[2], after[1]])
                 if chord.length > 0 and max(chord.distance(Point(q)) for q in stretch) <= FIT_BRIDGE_DEV_FT / f:
                     bridges += 1
