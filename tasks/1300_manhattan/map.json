@@ -20,17 +20,17 @@
   },
   "explode_blocks": true,
   "auto_boundary": {
-    "_comment": "Draft slab outline per floor: these layers are rasterised on a 0.5 ft grid, gaps up to close_ft are bridged, slivers thinner than open_ft removed, the outer ring traced. Balconies are included; the engineer splits them to ADDITIONAL-LOAD and cuts openings.",
+    "_comment": "Draft slab outline per floor: these layers are rasterised on a 0.5 ft grid, gaps up to close_ft are bridged, slivers thinner than open_ft removed, the outer ring traced. close_ft 1: wider notches (the party wall between two balconies, 1.5 ft) stay open so the balconies come out as rectangles; raise it only if a floor leaks (area collapses). Balconies are included; the engineer splits them to ADDITIONAL-LOAD and cuts openings.",
     "layers": ["^A-WALL$", "^I-WALL$", "^A-GLAZ", "^A-FLOR", "^S-STRS", "^A-DOOR$", "^C-PRKG$"],
     "include_columns": true,
-    "close_ft": 5,
+    "close_ft": 1,
     "open_ft": 2.5,
     "snap": [
       {"name": "FLOR", "layers": ["^A-FLOR$", "^A-FLOR-OTLN$"], "within_ft": 2.5, "show": "all"},
-      {"name": "RAIL", "layers": ["^A-FLOR-HRAL$"], "within_ft": 2.0, "show": "near"},
-      {"name": "WALL", "layers": ["^A-WALL$", "^A-GLAZ$", "^A-GLAZ-CURT$", "^A-WALL-PATT$"], "within_ft": 1.5, "show": "near"}
+      {"name": "WALL", "layers": ["^A-WALL$", "^A-GLAZ$", "^A-GLAZ-CURT$", "^A-WALL-PATT$"], "within_ft": 1.5, "show": "near"},
+      {"name": "RAIL", "layers": ["^A-FLOR-HRAL$"], "within_ft": 2.0, "show": "near"}
     ],
-    "_snap_note": "Tiers in order of trust; each becomes a review layer RV-EDGE-<name> in the working DXF. FLOR: the architect's floor edge (Revit floor lines, balcony outlines). RAIL: guardrail outlines at open balcony edges. WALL: the exterior wall face where the edge is hidden under a wall. The engineer deletes candidates that are not slab edge and draws missing ones, then `close` fits the loops exactly.",
+    "_snap_note": "Tiers in order of trust; each becomes a review layer RV-EDGE-<name> in the working DXF. FLOR: the architect's floor edge (Revit floor lines, balcony outlines). WALL: the exterior wall face where the edge is hidden under a wall. RAIL: guardrail outlines, last, so a Juliet guardrail a foot outside the wall does not pull the edge out at every window bay; it still catches a balcony front that has no floor line. The engineer deletes candidates that are not slab edge and draws missing ones, then `close` fits the loops exactly.",
     "gap_ft": 2,
     "min_area_sf": 500
   },

@@ -106,9 +106,15 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
   straight bridges where the edge passes under a party wall between two
   balconies. The candidates are written to `RV-EDGE-FLOR / RAIL / WALL`
   and the stretches with no line to `RV-GAP`, for the engineer's pass
-  (see the skill, step 5). Balconies are inside the draft and openings are
-  not cut. Known miss: the unstriped east parking bay on the 7th, 14
-  columns outside; extend by hand.
+  (see the skill, step 5). The loops are written as lines and true arcs.
+  Balconies are inside the draft and openings are not cut. Known miss: the
+  unstriped east parking bay on the 7th, 14 columns outside; extend by hand.
+  **Checked every layer of the overview and blow-up sheets: the set holds
+  no closed floor outline and no floor hatch, so there is no architect's
+  slab boundary to use directly.** The clean way is a floors-only DWG
+  export per level from CPA's Revit model (plan view with only the Floors
+  category visible, model space, shared coordinates); the map then takes
+  `A-FLOR` as `layers.boundary` with no fitting.
 - **Structural walls:** the architect pochés concrete walls as hatches on
   `A-WALL-PATT`: 8 to 12 in bands on Stairs 1 to 4, the PE#1/PE#2 and SE#1
   shafts, and the garage retaining and edge walls. `auto_walls` turns each

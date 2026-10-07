@@ -90,8 +90,13 @@ Everything here is reviewable by eye; nothing guesses silently.
      architect's lines. First a raster pass finds where the slab is: the
      `layers` linework (walls, glazing, floor edges, guardrails, stairs,
      doors, parking stripes, plus the column footprints) is drawn on a
-     0.5 ft grid, gaps up to `close_ft` (5) are closed, the interior filled,
-     slivers under `open_ft` (2.5) removed, and the outline traced. Then
+     0.5 ft grid, gaps up to `close_ft` are closed, the interior filled,
+     slivers under `open_ft` (2.5) removed, and the outline traced. Keep
+     `close_ft` small (1 ft on 1300 Manhattan): it must bridge the gaps in
+     the perimeter linework (door swings, curtain-wall joints) but not the
+     notches between balconies, or the balconies merge into one slanted
+     edge. If a floor's area collapses, the perimeter has a real hole;
+     raise `close_ft` for that project or add the layer that closes it. Then
      the outline is walked every 0.25 ft and pulled onto the `snap` tiers,
      in order of trust, each with its own reach:
      ```json
@@ -105,10 +110,26 @@ Everything here is reviewable by eye; nothing guesses silently.
      lines meeting within 3 ft of where the outline leaves one and joins the
      next make an exact corner; otherwise a short jog. A stretch with no line
      that is under 10 ft and nearly straight between its two neighbours
-     becomes one straight segment (a "bridge": the edge hidden under a party
-     wall between two balconies). Anything else keeps the raster trace and
-     is reported as a gap. Leave `layers.boundary` empty for it to run.
-     Balconies are inside the loop; no openings are cut.
+     becomes one straight segment (a "bridge"). Anything else keeps the
+     raster trace and is reported as a gap. When the next line is parallel
+     to the one the outline is on and a hair beside it (wall face next to
+     floor line), the outline stays on its line instead of stepping. The
+     result is written as lines and true arcs: hairline edges collapse and
+     runs of vertices on one circle (a curved facade exported as facets)
+     become bulge arcs, which the engine flattens itself. Leave
+     `layers.boundary` empty for it to run. Balconies are inside the loop;
+     no openings are cut.
+     Tier order matters: floor lines first, wall faces second, guardrails
+     last, or a Juliet guardrail a foot outside the wall pulls the edge out
+     at every window bay.
+     **If the architect can export the floors themselves, do that instead.**
+     Revit: a plan view per level with only the Floors category visible,
+     exported to DWG in model space with the shared coordinates; the floor
+     outlines then land on `A-FLOR` as closed loops with balconies and
+     openings, and `layers.boundary: ["A-FLOR"]` takes them straight into
+     `BOUNDARY` with no fitting at all. The fitting above exists because the
+     usual sheet export shows the floor edge only where it is not hidden
+     under a wall.
    - `auto_walls`: closed `WALL` outlines from the architect's wall poché
      (hatches on `hatch_layers` that read as a band `min_thickness_in` to
      `max_thickness_in` thick and at least `min_length_ft` long).

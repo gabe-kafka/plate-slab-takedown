@@ -106,17 +106,46 @@ def _arc_points(center_x: float, center_y: float, radius: float, start_deg: floa
     ]
 
 
+def _bulge_points(start: tuple, end: tuple, bulge: float) -> List[tuple]:
+    """Points along the arc a polyline bulge describes, start inclusive, end exclusive."""
+    from ezdxf.math import bulge_to_arc
+
+    try:
+        center, start_angle, end_angle, radius = bulge_to_arc(start, end, bulge)
+    except Exception:
+        return [start]
+    pts = _arc_points(center.x, center.y, radius, math.degrees(start_angle), math.degrees(end_angle))
+    if not pts:
+        return [start]
+    # bulge_to_arc returns the counter-clockwise sweep; a negative bulge runs the other way.
+    if bulge < 0:
+        pts = list(reversed(pts))
+    return [start] + pts[1:-1]
+
+
 def _polyline_vertices(entity, factor: float) -> List[tuple]:
+    """Vertices in feet, with every arc bulge expanded at CURVE_TOLERANCE_FEET."""
     if entity.dxftype() == "LWPOLYLINE":
-        vertices = [(point[0] * factor, point[1] * factor) for point in entity.get_points()]
+        raw = [(point[0] * factor, point[1] * factor, float(point[4] or 0.0)) for point in entity.get_points("xyseb")]
         closed = bool(entity.closed)
     else:
-        vertices = []
+        raw = []
         for vertex in entity.vertices:
             location = vertex.dxf.location
-            vertices.append((location.x * factor, location.y * factor))
+            raw.append((location.x * factor, location.y * factor, float(vertex.dxf.bulge or 0.0)))
         closed = bool(entity.is_closed)
 
+    if not raw:
+        return []
+    vertices: List[tuple] = []
+    count = len(raw)
+    for idx, (x, y, bulge) in enumerate(raw):
+        has_next = idx + 1 < count or closed
+        if abs(bulge) > 1e-9 and has_next:
+            nx, ny, _ = raw[(idx + 1) % count]
+            vertices.extend(_bulge_points((x, y), (nx, ny), bulge))
+        else:
+            vertices.append((x, y))
     if closed and vertices and vertices[0] != vertices[-1]:
         vertices.append(vertices[0])
     return vertices
