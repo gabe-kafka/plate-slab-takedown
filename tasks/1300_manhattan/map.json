@@ -20,10 +20,10 @@
   },
   "explode_blocks": true,
   "auto_boundary": {
-    "_comment": "Draft slab outline per floor: these layers are rasterised on a 0.5 ft grid, gaps up to close_ft are bridged, slivers thinner than open_ft removed, the outer ring traced. Balconies are included; the engineer splits them to ADDITIONAL-LOAD and cuts openings.",
+    "_comment": "Draft slab outline per floor: these layers are rasterised on a 0.5 ft grid, gaps up to close_ft are bridged, slivers thinner than open_ft removed, the outer ring traced. close_ft 1: wider notches (the party wall between two balconies, 1.5 ft) stay open so the balconies come out as rectangles; raise it only if a floor leaks (area collapses). Balconies are included; the engineer splits them to ADDITIONAL-LOAD and cuts openings.",
     "layers": ["^A-WALL$", "^I-WALL$", "^A-GLAZ", "^A-FLOR", "^S-STRS", "^A-DOOR$", "^C-PRKG$"],
     "include_columns": true,
-    "close_ft": 5,
+    "close_ft": 1,
     "open_ft": 2.5,
     "snap": [
       {"name": "FLOR", "layers": ["^A-FLOR$", "^A-FLOR-OTLN$"], "within_ft": 2.5, "show": "all"},
