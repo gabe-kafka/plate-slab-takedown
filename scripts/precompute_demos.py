@@ -22,26 +22,45 @@ DEMO_DIR = ROOT / "web" / "api" / "_engine" / "demo"
 OUT_DIR = ROOT / "web" / "public" / "demos"
 RUNNER = ROOT / "scripts" / "run_engine_local.py"
 
-# slug -> (bundled file, source units); mirrors web/src/lib/demos.ts and web/api/upload.py
+# slug -> (bundled file, source units, layer overrides); mirrors
+# web/src/lib/demos.ts and web/api/upload.py. The mapping is the upload
+# inspector's rules-path suggestion, with the overrides an engineer would make
+# on the review page (a balcony layer is additional load, layer 0 is not a
+# column layer).
 DEMOS = {
-    "358-flatbush": ("INPUT.dxf", "in"),
-    "1025-atlantic": ("geom_clean_1.dxf", "in"),
-    "356-fulton": ("356_fulton.dxf", "in"),
-    "246-franklin": ("246_franklin.dxf", "in"),
-    "1300-manhattan": ("1300_manhattan.dxf", "in"),
+    "358-flatbush": ("INPUT.dxf", "in", {}),
+    "1025-atlantic": ("geom_clean_1.dxf", "in", {"support_point": ["COLUMN-FOOTPRINT"], "additional_load": ["SECONDARY AREA"]}),
+    "356-fulton": ("356_fulton.dxf", "in", {"boundary": ["SLAB-RESIDENTIAL"], "additional_load": ["SLAB-BALCONY"], "support_point": ["COLS"]}),
+    "246-franklin": ("246_franklin.dxf", "in", {}),
+    "1300-manhattan": ("1300_manhattan.dxf", "in", {}),
 }
+
+
+def layer_map_for(src: Path, units: str, overrides: dict) -> dict:
+    """The layer mapping the app itself would use: the upload inspector's
+    suggestions (rules path), so the precomputed result matches a live run."""
+    sys.path.insert(0, str(ROOT / "web" / "api" / "_engine"))
+    from inspection_utils import inspect_dxf_bytes  # noqa: E402
+
+    draft = inspect_dxf_bytes(src.read_bytes(), src.name)
+    layers = {role: list(names) for role, names in draft["suggestions"].items()}
+    layers.update(overrides)
+    return {"source_units": units, "layers": layers}
 
 
 def main(argv):
     slugs = argv or list(DEMOS)
     failed = []
     for slug in slugs:
-        filename, units = DEMOS[slug]
+        filename, units, overrides = DEMOS[slug]
         src = DEMO_DIR / filename
         work = Path(tempfile.mkdtemp(prefix=f"demo-{slug}-"))
         print(f"== {slug}: {filename}")
+        mapping = layer_map_for(src, units, overrides)
+        (work / "map.json").write_text(json.dumps(mapping), encoding="utf-8")
+        print("   layers:", {k: v for k, v in mapping["layers"].items() if v})
         proc = subprocess.run(
-            [sys.executable, str(RUNNER), str(src), "--out", str(work / "engine"), "--units", units, "--quiet"],
+            [sys.executable, str(RUNNER), str(src), "--out", str(work / "engine"), "--map", str(work / "map.json"), "--units", units, "--quiet"],
             capture_output=True, text=True,
         )
         logs = (proc.stdout + proc.stderr).splitlines()
