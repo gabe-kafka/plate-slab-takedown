@@ -3,17 +3,12 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { type DemoId, uploadDemo, uploadDxf } from "@/lib/api";
+import { uploadDemo, uploadDxf } from "@/lib/api";
+import { DEMO_PROJECTS } from "@/lib/demos";
 import { layerMappingFromDraft } from "@/lib/layerMapping";
 import type { DraftData } from "@/lib/types";
 
-const DEMO_OPTIONS: { id: DemoId; label: string; filename: string }[] = [
-  { id: "default", label: "Load 358 Demo 1 (good example)", filename: "358 Flatbush - input.dxf" },
-  { id: "geom_clean_1", label: "Load 1025 Demo 2 (good example)", filename: "1025 Atlantic - input.dxf" },
-  { id: "fulton_356", label: "Load 356 Demo 3 (best reference)", filename: "356 Fulton - input.dxf" },
-  { id: "franklin_246", label: "Load 246 Demo 4", filename: "246 Franklin - input.dxf" },
-  { id: "manhattan_1300", label: "Load 1300 Demo 5 (hillside, arch background)", filename: "1300 Manhattan - input.dxf" },
-];
+const DEMO_OPTIONS = DEMO_PROJECTS;
 const LANDING_DEMO = DEMO_OPTIONS[2];
 
 interface UploadFlowProps {
@@ -255,6 +250,21 @@ function UploadFlowInner({ forceUploader = false }: UploadFlowProps) {
               {demo.label}
             </button>
           ))}
+        </div>
+
+        <div className="text-[11px] text-text-muted space-y-1">
+          <div>Direct links, ISO view with tributaries on, no clicks needed:</div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {DEMO_OPTIONS.map((demo) => (
+              <Link
+                key={demo.slug}
+                href={`/demo/${demo.slug}`}
+                className="text-accent hover:underline"
+              >
+                /demo/{demo.slug}
+              </Link>
+            ))}
+          </div>
         </div>
 
         <a

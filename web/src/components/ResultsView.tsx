@@ -34,12 +34,15 @@ interface ResultsViewProps {
   result: ProcessResult;
   geometry: GeometryPayload;
   initialViewMode?: ViewMode;
+  /** Tributaries drawn from the start; defaults to on in plan view, off in ISO. */
+  initialShowTributaries?: boolean;
 }
 
 export default function ResultsView({
   result,
   geometry,
   initialViewMode = "plan",
+  initialShowTributaries,
 }: ResultsViewProps) {
   const initialIsoMode = initialViewMode === "iso";
   const [visibleFloors, setVisibleFloors] = useState<Set<string>>(
@@ -50,7 +53,9 @@ export default function ResultsView({
   const [selectedWall, setSelectedWall] = useState<SelectedWall | null>(null);
   const [hoveredColumn, setHoveredColumn] =
     useState<SelectedColumn | null>(null);
-  const [showTributaries, setShowTributaries] = useState(!initialIsoMode);
+  const [showTributaries, setShowTributaries] = useState(
+    initialShowTributaries ?? !initialIsoMode,
+  );
   const [highlightUnlabeled, setHighlightUnlabeled] = useState(false);
   const [showSlabDebug, setShowSlabDebug] = useState(false);
   const [showSlabs, setShowSlabs] = useState(true);
