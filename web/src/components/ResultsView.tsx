@@ -18,6 +18,12 @@ import type {
   WallData,
 } from "@/lib/types";
 
+/** Blob artifacts go through the private download proxy; precomputed demo
+ *  artifacts are static files under /demos and link directly. */
+function downloadHref(url: string): string {
+  return url.startsWith("/") ? url : `/api/download?url=${encodeURIComponent(url)}`;
+}
+
 type DatumPoints = Record<string, [number, number]>;
 type SelectedColumn = {
   floorId: string;
@@ -376,7 +382,8 @@ export default function ResultsView({
           )}
           {result.artifacts.dxf_url && (
             <a
-              href={`/api/download?url=${encodeURIComponent(result.artifacts.dxf_url)}`}
+              href={downloadHref(result.artifacts.dxf_url)}
+              download
               className="px-3 py-0.5 text-[10px] uppercase tracking-wider border border-border-panel text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors"
             >
               DXF
@@ -384,7 +391,8 @@ export default function ResultsView({
           )}
           {result.artifacts.xlsx_url && (
             <a
-              href={`/api/download?url=${encodeURIComponent(result.artifacts.xlsx_url)}`}
+              href={downloadHref(result.artifacts.xlsx_url)}
+              download
               className="px-3 py-0.5 text-[10px] uppercase tracking-wider border border-border-panel text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors"
             >
               XLSX

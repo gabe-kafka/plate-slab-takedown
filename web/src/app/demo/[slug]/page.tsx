@@ -37,6 +37,16 @@ export default function DemoPage() {
     document.title = `${demo.name} · Tributary Areas`;
     (async () => {
       try {
+        // Precomputed result (scripts/precompute_demos.py) opens instantly;
+        // fall back to the live engine when it is missing.
+        const cached = await fetch(`/demos/${demo.slug}/result.json`, { cache: "force-cache" });
+        if (cached.ok) {
+          const res = (await cached.json()) as ProcessResult;
+          if (res.status === "completed" && res.geometry) {
+            setResult(res);
+            return;
+          }
+        }
         const draft = await uploadDemo(demo.id);
         setStage("computing");
         const res = await processJob(draft.blob_url, "in", layerMappingFromDraft(draft));
