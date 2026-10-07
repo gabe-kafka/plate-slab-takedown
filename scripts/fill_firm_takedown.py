@@ -118,6 +118,61 @@ def clone_sheet(wb, src, title, before):
     return dst
 
 
+SCHED_FIRST_BAND = 5     # schedule rows 5-8 show C-(n) row 93, 9-12 row 94, ...
+SCHED_BAND_ROWS = 4
+SCHED_BANDS = 21
+SCHED_PATTERN_BAND = 17  # a band whose six cells are all intact in the template
+SCHED_FND_ROW = 89
+CELL_REF = re.compile(r"(\$?)([A-Z]{1,2})(\$?)(\d+)")
+
+
+def rebuild_schedule_bands(ws, pair_cols, n_levels):
+    """Rewrite the six formula cells of every band x column pair from one intact
+    band. The firm's template has bands with formulas missing or typed over
+    ("12x24" literals), which never showed on buildings that start lower.
+    Unused bands are hidden and FND LOADS reads the lowest level's row."""
+    r1 = SCHED_PATTERN_BAND
+    p1, q1 = pair_cols[0], pair_cols[0] + 1
+    pattern = []
+    for (r, c) in ((r1, p1), (r1, q1), (r1 + 1, p1), (r1 + 1, q1), (r1 + 2, q1), (r1 + 3, q1)):
+        v = ws.cell(r, c).value
+        text = v.text if isinstance(v, ArrayFormula) else v
+        if not (isinstance(text, str) and text.startswith("=")):
+            raise SystemExit(f"Column Schedule {L(c)}{r} is not a formula; cannot use band {r1} as the pattern")
+        pattern.append((r - r1, c - p1, text))
+    src_letter = L(p1)
+
+    def shifted(text, r0, p):
+        def sub(m):
+            col_abs, col, row_abs, row = m.group(1), m.group(2), m.group(3), int(m.group(4))
+            if col == src_letter and not col_abs:
+                return f"{L(p)}{row_abs}{row if row_abs else row - r1 + r0}"
+            if col_abs and r1 <= row < r1 + SCHED_BAND_ROWS:
+                return f"${col}{row_abs}{row - r1 + r0}"
+            return m.group(0)
+        return CELL_REF.sub(sub, text)
+
+    for b in range(SCHED_BANDS):
+        r0 = SCHED_FIRST_BAND + b * SCHED_BAND_ROWS
+        for p in pair_cols:
+            for dr, dc, text in pattern:
+                cell = ws.cell(r0 + dr, p + dc)
+                cell.value = ArrayFormula(cell.coordinate, shifted(text, r0, p))
+        hidden = b >= n_levels
+        for r in range(r0, r0 + SCHED_BAND_ROWS):
+            ws.row_dimensions[r].hidden = hidden
+    put(ws, SCHED_FND_ROW, 1, BASE_ROW + n_levels - 1)
+    # FND LOADS shows only where the last band has a size: point it at the lowest level's band
+    last_size_row = SCHED_FIRST_BAND + (n_levels - 1) * SCHED_BAND_ROWS + 1
+    tmpl_size_row = SCHED_FIRST_BAND + (SCHED_BANDS - 1) * SCHED_BAND_ROWS + 1
+    for p in pair_cols:
+        cell = ws.cell(SCHED_FND_ROW, p)
+        v = cell.value
+        text = v.text if isinstance(v, ArrayFormula) else v
+        if isinstance(text, str) and text.startswith("="):
+            set_formula(cell, re.sub(rf"(?<![A-Z$]){L(p)}{tmpl_size_row}(?!\d)", f"{L(p)}{last_size_row}", text))
+
+
 def fill_master(ws, title_a1, numbers, slabs, values, assumed):
     """Clear the grid and write header, slab rows and values (None stays blank)."""
     for row in ws.iter_rows(min_row=1, max_row=max(ws.max_row, 40), max_col=max(ws.max_column, len(numbers) + 1)):
@@ -242,6 +297,7 @@ def main(argv):
         if r > 9:              # 5 and 9 are the template's BULKHEAD / ROOF literals
             ref = f'INDIRECT("\'"&P$1&"\'!"&$B{r})'
             sched.cell(r, 14, f'=IF({ref}=0,"",{ref})')
+    rebuild_schedule_bands(sched, sched_cols, len(levels))
     if sched["O5"].value:
         sched["O5"] = f"{int(fc * 1000)} PSI"
     pages = math.ceil(len(numbers) / SCHEDULE_WIDTH)
