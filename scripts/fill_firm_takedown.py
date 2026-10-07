@@ -9,7 +9,7 @@ reduction and column checks itself. This script only feeds it:
   C-BASE                                   elevations, floor labels, f'c, slab thickness
   C-(n)                                    one sheet per column (cloned from C-(1)),
                                            per-level SDL / facade psf / live load
-  Column Schedule                          one copy per 25 columns
+  Column Schedule                          one pair of columns per column, on one sheet
   NOTES                                    column map and the assumptions used
 
 usage: python scripts/fill_firm_takedown.py <engine column_load_takedown.xlsx>
@@ -37,7 +37,6 @@ BASE_ROW = 93          # C-BASE / C-(n) row of the top level
 MASTER_FIRST_ROW = 2   # master row of the top slab (= BASE_ROW + 1 - 92)
 ROW_TO_MASTER = BASE_ROW + 1 - MASTER_FIRST_ROW  # C-(n) row r reads master row r - 92
 LAST_ROW = 113
-SCHEDULE_WIDTH = 25
 MASTER_REF = re.compile(
     r"((?:'MASTER TRIB'|'MASTER FASCADE'|MASTER_KLL)!)(\$?)([A-Z]{1,3})(\$?\d+)(?::(\$?)([A-Z]{1,3})(\$?\d+))?"
 )
@@ -173,6 +172,76 @@ def rebuild_schedule_bands(ws, pair_cols, n_levels):
             set_formula(cell, re.sub(rf"(?<![A-Z$]){L(p)}{tmpl_size_row}(?!\d)", f"{L(p)}{last_size_row}", text))
 
 
+SCHED_FIRST_PAIR = 16    # column P: the template's first column pair (P = sizes, Q = loads)
+SCHED_LAST_ROW = 90
+SCHED_LABEL_COLS = "N:O"
+
+
+def reletter(text, old, new):
+    """Move relative references from column `old` to column `new` (P$1 -> BO$1, P86 -> BO86)."""
+    def sub(m):
+        if m.group(2) == old and not m.group(1):
+            return f"{new}{m.group(3)}{m.group(4)}"
+        return m.group(0)
+    return CELL_REF.sub(sub, text)
+
+
+def widen_schedule(ws, n_pairs):
+    """Grow the template's 25 column pairs to n_pairs on the one sheet: pair k is a
+    copy of pair P:Q (values relettered, styles, widths, merges), the right-hand
+    label column moves to the end, print setup spans the width. Returns the
+    size column of every pair."""
+    tmpl_pairs = [c for c in range(SCHED_FIRST_PAIR, ws.max_column + 1, 2)
+                  if str(ws.cell(4, c).value or "").isdigit()]
+    right = tmpl_pairs[-1] + 2                      # the template's right-hand label column
+    rows = range(1, SCHED_LAST_ROW + 1)
+    right_cells = [(r, ws.cell(r, right).value, copy(ws.cell(r, right)._style)) for r in rows]
+    right_width = ws.column_dimensions[L(right)].width
+    right_merges = [(m.min_row, m.max_row) for m in ws.merged_cells.ranges if m.min_col == right]
+    title = [m for m in ws.merged_cells.ranges if m.min_row == 3 and m.min_col < SCHED_FIRST_PAIR and m.max_col >= right]
+    for m in list(ws.merged_cells.ranges):
+        if m.min_col >= right or m in title:
+            ws.unmerge_cells(str(m))
+    pair_merges = [(m.min_row, m.max_row, m.min_col - SCHED_FIRST_PAIR, m.max_col - SCHED_FIRST_PAIR)
+                   for m in ws.merged_cells.ranges if m.min_col in (SCHED_FIRST_PAIR, SCHED_FIRST_PAIR + 1)]
+    src = [[(ws.cell(r, SCHED_FIRST_PAIR + d).value, copy(ws.cell(r, SCHED_FIRST_PAIR + d)._style)) for d in (0, 1)] for r in rows]
+    widths = [ws.column_dimensions[L(SCHED_FIRST_PAIR + d)].width for d in (0, 1)]
+    for c in range(right, ws.max_column + 1):
+        for r in rows:
+            put(ws, r, c, None)
+    pairs = [SCHED_FIRST_PAIR + 2 * k for k in range(n_pairs)]
+    for p in pairs[len(tmpl_pairs):]:
+        for d in (0, 1):
+            ws.column_dimensions[L(p + d)].width = widths[d]
+            for r, cells in zip(rows, src):
+                v, style = cells[d]
+                text = v.text if isinstance(v, ArrayFormula) else v
+                if isinstance(text, str) and text.startswith("="):
+                    text = reletter(text, L(SCHED_FIRST_PAIR), L(p))
+                    v = ArrayFormula(f"{L(p + d)}{r}", text) if isinstance(v, ArrayFormula) else text
+                cell = ws.cell(r, p + d)
+                cell.value = v
+                cell._style = copy(style)
+        for r0, r1, c0, c1 in pair_merges:
+            ws.merge_cells(start_row=r0, end_row=r1, start_column=p + c0, end_column=p + c1)
+    last = pairs[-1] + 2
+    ws.column_dimensions[L(last)].width = right_width
+    for r, v, style in right_cells:
+        cell = ws.cell(r, last)
+        cell.value = v
+        cell._style = style
+    for r0, r1 in right_merges:
+        ws.merge_cells(start_row=r0, end_row=r1, start_column=last, end_column=last)
+    if title:
+        ws.merge_cells(start_row=3, end_row=3, start_column=title[0].min_col, end_column=last)
+    ws.print_area = f"N3:{L(last)}{SCHED_LAST_ROW}"
+    ws.print_title_cols = SCHED_LABEL_COLS
+    ws.page_setup.fitToWidth = 0
+    ws.page_setup.fitToHeight = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    return pairs
+
+
 def fill_master(ws, title_a1, numbers, slabs, values, assumed):
     """Clear the grid and write header, slab rows and values (None stays blank)."""
     for row in ws.iter_rows(min_row=1, max_row=max(ws.max_row, 40), max_col=max(ws.max_column, len(numbers) + 1)):
@@ -289,29 +358,18 @@ def main(argv):
         ws = clone_sheet(wb, base, f"C-({n})", tail)
         retarget_masters(ws, L(n + 1))
 
-    # Column Schedule: 25 columns per sheet, floor labels read from the sheets.
+    # Column Schedule: one sheet, one column pair per column, floor labels read from the sheets.
     sched = wb["Column Schedule"]
-    sched_cols = [c for c in range(16, sched.max_column + 1, 2) if isinstance(sched.cell(4, c).value, (int, str))
-                  and str(sched.cell(4, c).value).isdigit()]
     for r in range(5, 86, 4):  # floor label rows 5, 9, ..., 85
         if r > 9:              # 5 and 9 are the template's BULKHEAD / ROOF literals
             ref = f'INDIRECT("\'"&P$1&"\'!"&$B{r})'
             sched.cell(r, 14, f'=IF({ref}=0,"",{ref})')
+    sched_cols = widen_schedule(sched, len(numbers))
     rebuild_schedule_bands(sched, sched_cols, len(levels))
     if sched["O5"].value:
         sched["O5"] = f"{int(fc * 1000)} PSI"
-    pages = math.ceil(len(numbers) / SCHEDULE_WIDTH)
-    for p in range(pages):
-        first = p * SCHEDULE_WIDTH + 1
-        last = min(first + SCHEDULE_WIDTH - 1, len(numbers))
-        ws = sched if p == 0 else clone_sheet(wb, sched, f"Column Schedule {first}-{last}", wb["MASTER TRIB"])
-        for k, c in enumerate(sched_cols):
-            n = first + k
-            put(ws, 4, c, str(n) if n <= last else None)
-            if n > last:
-                put(ws, 1, c, None)
-    if pages > 1:
-        sched.title = f"Column Schedule 1-{min(SCHEDULE_WIDTH, len(numbers))}"
+    for n, c in zip(numbers, sched_cols):
+        put(sched, 4, c, str(n))
 
     # NOTES
     notes = wb.create_sheet("NOTES", 0)
@@ -363,7 +421,7 @@ def main(argv):
         ws.sheet_view.tabSelected = ws.title == "NOTES"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
-    print(f"{out_path}: {len(numbers)} columns, {len(levels)} levels, {pages} schedule page(s), {len(wb.sheetnames)} sheets")
+    print(f"{out_path}: {len(numbers)} columns, {len(levels)} levels, {len(wb.sheetnames)} sheets")
     return 0
 
 

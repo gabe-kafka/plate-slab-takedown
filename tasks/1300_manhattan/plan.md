@@ -185,7 +185,7 @@ sheets and their `a`/`b` blow-ups. They are Revit per-view exports.
       1025 Atlantic takedown as template (newest MASTER TRIB-style workbook in
       the Drive, 2026-06-22) and `takedown_levels.json` (elevations from
       A-200, slab from which engine floor, SDL / LL / slab thickness per
-      level). 133 columns: C1 to C117 keep their numbers, the 16 untagged
+      level). One Column Schedule sheet 133 columns wide (print titles repeat the floor labels); C1 to C117 keep their numbers, the 16 untagged
       garage columns are 118 to 133 (map in NOTES). Levels 1 to 3 and ROOF
       stand in from the 4th and 11th (yellow). Column sizes are the template's
       12x24 default until the engineer sets them. Re-run with the same command

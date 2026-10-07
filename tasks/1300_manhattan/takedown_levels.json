@@ -11,21 +11,127 @@
     "areas, facade lengths and KLL stand for the slab AT this level; 'assumed' marks",
     "levels not in the drawing set. 'sdl', 'll' (psf) and 'slab_in' describe that",
     "slab. The firm's sheet charges each column segment with the slab one level up,",
-    "so the bottom level's slab is not carried by any segment (slab on grade)."
+    "so the bottom level's slab is not carried by any segment (slab on grade).",
+    "Loads per the engineer: dead 112.5 psf on every slab (a 9 in slab's self-weight, SDL 0), live 40 psf everywhere, 100 psf on the top floor (11th) slab."
   ],
   "levels": [
-    {"level": "BLKH", "elev": null, "slab_from": null, "note": "No bulkhead slab in the set; row kept for the template."},
-    {"level": "ROOF", "elev": 201.5, "slab_from": "11", "assumed": true, "sdl": 30, "ll": 30, "slab_in": 10, "note": "A-109 not received; the 11th floor plate stands in. Main roof live load 30 psf."},
-    {"level": "11", "elev": 191.0, "slab_from": "11", "sdl": 30, "ll": 100, "slab_in": 10, "note": "Amenity roof over the bar, pool, fitness, clubroom, parking SL2: 100 psf assembly, not reduced."},
-    {"level": "10", "elev": 179.5, "slab_from": "10", "sdl": 20, "ll": 100, "slab_in": 10, "note": "Lobby, mail, co-work at street level plus parking and units: 100 psf lobby governs the row."},
-    {"level": "9", "elev": 169.0, "slab_from": "9", "sdl": 20, "ll": 40, "slab_in": 10, "note": "Units plus parking (40 psf passenger garage)."},
-    {"level": "8", "elev": 158.5, "slab_from": "8", "sdl": 20, "ll": 40, "slab_in": 10, "note": "Units plus parking."},
-    {"level": "7", "elev": 148.0, "slab_from": "7", "sdl": 20, "ll": 40, "slab_in": 10, "note": "Units plus first full parking level."},
-    {"level": "6", "elev": 137.5, "slab_from": "6", "sdl": 20, "ll": 40, "slab_in": 8, "note": "Bar plus 3 units east of the match line."},
-    {"level": "5", "elev": 127.0, "slab_from": "5", "sdl": 20, "ll": 40, "slab_in": 8, "note": "Bar only (A-106 covers 4 and 5)."},
-    {"level": "4", "elev": 116.5, "slab_from": "4", "sdl": 20, "ll": 40, "slab_in": 8, "note": "Bar only (A-106 covers 4 and 5)."},
-    {"level": "3", "elev": 106.0, "slab_from": "4", "assumed": true, "sdl": 20, "ll": 40, "slab_in": 8, "note": "A-107 not received; the 4th stands in."},
-    {"level": "2", "elev": 95.5, "slab_from": "4", "assumed": true, "sdl": 20, "ll": 40, "slab_in": 8, "note": "A-107 not received; the 4th stands in."},
-    {"level": "1", "elev": 85.0, "slab_from": "4", "assumed": true, "sdl": 20, "ll": 40, "slab_in": 8, "note": "A-108 not received; lowest level, treated as slab on grade (its slab loads no column)."}
+    {
+      "level": "BLKH",
+      "elev": null,
+      "slab_from": null,
+      "note": "No bulkhead slab in the set; row kept for the template."
+    },
+    {
+      "level": "ROOF",
+      "elev": 201.5,
+      "slab_from": "11",
+      "assumed": true,
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "A-109 not received; the 11th floor plate stands in."
+    },
+    {
+      "level": "11",
+      "elev": 191.0,
+      "slab_from": "11",
+      "sdl": 0,
+      "ll": 100,
+      "slab_in": 9,
+      "note": "Top floor: amenity roof over the bar, pool, fitness, clubroom, parking SL2. Live load 100 psf per the engineer."
+    },
+    {
+      "level": "10",
+      "elev": 179.5,
+      "slab_from": "10",
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "Lobby, mail, co-work at street level plus parking and units."
+    },
+    {
+      "level": "9",
+      "elev": 169.0,
+      "slab_from": "9",
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "Units plus parking."
+    },
+    {
+      "level": "8",
+      "elev": 158.5,
+      "slab_from": "8",
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "Units plus parking."
+    },
+    {
+      "level": "7",
+      "elev": 148.0,
+      "slab_from": "7",
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "Units plus first full parking level."
+    },
+    {
+      "level": "6",
+      "elev": 137.5,
+      "slab_from": "6",
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "Bar plus 3 units east of the match line."
+    },
+    {
+      "level": "5",
+      "elev": 127.0,
+      "slab_from": "5",
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "Bar only (A-106 covers 4 and 5)."
+    },
+    {
+      "level": "4",
+      "elev": 116.5,
+      "slab_from": "4",
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "Bar only (A-106 covers 4 and 5)."
+    },
+    {
+      "level": "3",
+      "elev": 106.0,
+      "slab_from": "4",
+      "assumed": true,
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "A-107 not received; the 4th stands in."
+    },
+    {
+      "level": "2",
+      "elev": 95.5,
+      "slab_from": "4",
+      "assumed": true,
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "A-107 not received; the 4th stands in."
+    },
+    {
+      "level": "1",
+      "elev": 85.0,
+      "slab_from": "4",
+      "assumed": true,
+      "sdl": 0,
+      "ll": 40,
+      "slab_in": 9,
+      "note": "A-108 not received; lowest level, treated as slab on grade (its slab loads no column)."
+    }
   ]
 }
