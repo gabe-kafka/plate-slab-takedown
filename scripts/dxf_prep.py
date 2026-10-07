@@ -489,6 +489,14 @@ FIT_ABSORB_FT = 2.0       # unsnapped stretches shorter than this between two li
 FIT_BRIDGE_FT = 10.0      # ... up to this long become one straight segment between the two lines
 FIT_BRIDGE_DEV_FT = 1.0   #     if the straight segment stays this close to the traced stretch
 FIT_SIMPLIFY_FT = 0.01    # only duplicate / collinear vertices are removed
+FIT_PARALLEL_DEG = 0.5    # the next line is "the same line" when within this angle ...
+FIT_STEP_OFF_FT = 0.5     # ... and this offset: the outline continues on the line it is on
+CLEAN_MIN_EDGE_FT = 0.1   # edges shorter than this collapse to their midpoint
+CLEAN_ARC_TOL_FT = 0.05   # vertices this close to one circle become an arc ...
+CLEAN_ARC_MIN_PTS = 4     # ... when at least this many in a row ...
+CLEAN_ARC_MAX_TURN_DEG = 30.0  # ... each turning no more than this
+CLEAN_ARC_MIN_R_FT = 5.0
+CLEAN_ARC_MAX_R_FT = 3000.0
 
 
 def fit_ring(coords: Sequence[tuple], tiers: List[tuple], units: str, gap_ft: float = 2.0) -> Dict:
@@ -649,6 +657,25 @@ def fit_ring(coords: Sequence[tuple], tiers: List[tuple], units: str, gap_ft: fl
         t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / d
         return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
 
+    step_off = FIT_STEP_OFF_FT / f
+    cos_par = math.cos(math.radians(FIT_PARALLEL_DEG))
+
+    def parallel(s1, s2):
+        (vx, vy), (wx, wy) = seg_vec(s1), seg_vec(s2)
+        l1, l2 = math.hypot(vx, vy), math.hypot(wx, wy)
+        return l1 > 0 and l2 > 0 and abs(vx * wx + vy * wy) / (l1 * l2) >= cos_par
+
+    def line_offset(seg, p):
+        """Signed distance of point p from the infinite line of seg."""
+        (ax, ay), (bx, by) = seg
+        vx, vy = bx - ax, by - ay
+        l = math.hypot(vx, vy)
+        return ((p[0] - ax) * vy - (p[1] - ay) * vx) / l if l else 0.0
+
+    def line_pt(seg, p):
+        """Foot of p on the infinite line of seg (not clamped)."""
+        return seg_pt(seg, proj_t(seg, p))
+
     # Each snapped run contributes the two points where it enters and leaves
     # its line (clamped to the line plus a small extension).
     ends: List[tuple | None] = []
@@ -691,6 +718,14 @@ def fit_ring(coords: Sequence[tuple], tiers: List[tuple], units: str, gap_ft: fl
         seg, a, b = ends[k]
         on_len += len(idxs) * step
         if prev_seg is not None and verts:
+            # A line parallel to the one the outline is on and a hair beside
+            # it (the wall face next to the floor line) is the same edge:
+            # stay on the current line, extended, instead of stepping over.
+            if parallel(prev_seg, seg) and abs(line_offset(prev_seg, a)) <= step_off and abs(line_offset(prev_seg, b)) <= step_off:
+                b = line_pt(prev_seg, pts[idxs[-1]])
+                verts.append(b)
+                prev_seg = (prev_seg[0], b)  # same line, now reaching b
+                continue
             x = intersect(prev_seg, seg)
             if x and math.hypot(x[0] - verts[-1][0], x[1] - verts[-1][1]) <= corner and math.hypot(x[0] - a[0], x[1] - a[1]) <= corner:
                 verts[-1] = x
@@ -713,6 +748,125 @@ def fit_ring(coords: Sequence[tuple], tiers: List[tuple], units: str, gap_ft: fl
         return {"polygon": None, "gaps": gaps, "bridges": bridges, "on_ft": on_len * f, "total_ft": total * f}
     poly = Polygon(poly.exterior).simplify(FIT_SIMPLIFY_FT / f)
     return {"polygon": poly, "gaps": gaps, "bridges": bridges, "on_ft": on_len * f, "total_ft": total * f}
+
+
+def clean_ring(coords: Sequence[tuple], units: str) -> List[tuple]:
+    """Fitted ring -> drawing geometry: straight lines and true arcs.
+
+    Edges shorter than CLEAN_MIN_EDGE_FT collapse to their midpoint. Then
+    four or more consecutive vertices lying within CLEAN_ARC_TOL_FT of one
+    circle (same turning direction, moderate radius, no sharp turn) become
+    one arc, the way Revit's faceted export of a curved facade was drawn.
+    Returns [(x, y, bulge)] for an LWPOLYLINE in 'xyb' format, closed.
+    """
+    f = unit_factor(units)
+    pts = [tuple(c[:2]) for c in coords]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    min_edge = CLEAN_MIN_EDGE_FT / f
+    changed = True
+    while changed and len(pts) > 3:
+        changed = False
+        n = len(pts)
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            if math.hypot(b[0] - a[0], b[1] - a[1]) < min_edge:
+                mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                pts[i] = mid
+                del pts[(i + 1) % n]
+                changed = True
+                break
+    n = len(pts)
+    if n < 4:
+        return [(x, y, 0.0) for x, y in pts]
+
+    tol = CLEAN_ARC_TOL_FT / f
+    r_min, r_max = CLEAN_ARC_MIN_R_FT / f, CLEAN_ARC_MAX_R_FT / f
+    max_turn = math.radians(CLEAN_ARC_MAX_TURN_DEG)
+
+    def circle(p, q, r):
+        ax, ay = p
+        bx, by = q
+        cx, cy = r
+        d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        if abs(d) < 1e-9:
+            return None
+        ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
+        uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+        return (ux, uy, math.hypot(ax - ux, ay - uy))
+
+    def turn(i):
+        a, b, c = pts[(i - 1) % n], pts[i], pts[(i + 1) % n]
+        v = (b[0] - a[0], b[1] - a[1])
+        w = (c[0] - b[0], c[1] - b[1])
+        cross = v[0] * w[1] - v[1] * w[0]
+        dot = v[0] * w[0] + v[1] * w[1]
+        return math.atan2(cross, dot)
+
+    def is_arc(i, j):
+        """Vertices i..j (cyclic, j > i) on one circle, consistent turning."""
+        run = [pts[k % n] for k in range(i, j + 1)]
+        if len(run) < CLEAN_ARC_MIN_PTS:
+            return None
+        turns = [turn(k % n) for k in range(i + 1, j)]
+        if not turns or any(abs(t) > max_turn or abs(t) < 1e-6 for t in turns):
+            return None
+        if any((t > 0) != (turns[0] > 0) for t in turns):
+            return None
+        c = circle(run[0], run[len(run) // 2], run[-1])
+        if c is None or not (r_min <= c[2] <= r_max):
+            return None
+        if any(abs(math.hypot(p[0] - c[0], p[1] - c[1]) - c[2]) > tol for p in run):
+            return None
+        sweep = sum(turns) + 0.0  # interior turning; the chord-to-chord turns sum to the arc sweep
+        if abs(sweep) >= math.pi:
+            return None
+        return c, sweep
+
+    # Greedy longest arcs, starting at a vertex that is a true corner if any.
+    start = 0
+    for i in range(n):
+        if abs(turn(i)) > max_turn:
+            start = i
+            break
+    out: List[tuple] = []
+    i = start
+    end = start + n
+    while i < end:
+        best = None
+        j = i + CLEAN_ARC_MIN_PTS - 1
+        while j < end:
+            res = is_arc(i, j)
+            if res is None:
+                break
+            best = (j, res)
+            j += 1
+        if best is None:
+            out.append((pts[i % n][0], pts[i % n][1], 0.0))
+            i += 1
+            continue
+        j, (c, sweep) = best
+        # The arc from pts[i] to pts[j] through the fitted circle; bulge =
+        # tan(sweep / 4), positive counter-clockwise. The sweep between the
+        # end points is the chord-turn sum plus half the end turns' share;
+        # take it directly from the end points on the circle instead.
+        p0, p1 = pts[i % n], pts[j % n]
+        a0 = math.atan2(p0[1] - c[1], p0[0] - c[0])
+        a1 = math.atan2(p1[1] - c[1], p1[0] - c[0])
+        d = a1 - a0
+        while d <= -math.pi:
+            d += 2 * math.pi
+        while d > math.pi:
+            d -= 2 * math.pi
+        if (d > 0) != (sweep > 0):
+            out.append((p0[0], p0[1], 0.0))  # inconsistent fit: keep the straight edges
+            i += 1
+            continue
+        out.append((p0[0], p0[1], math.tan(d / 4)))
+        i = j
+    if out and i % n == start and len(out) > 1 and out[-1][:2] == (pts[start][0], pts[start][1]):
+        out.pop()
+    return out
 
 
 def fit_polygons(polys: List[Polygon], tiers: List[tuple], units: str, gap_ft: float) -> tuple:
@@ -1221,10 +1375,9 @@ def cmd_prep(args) -> int:
         boundary_sf = 0.0
         boundary_polys = list(floor_meta.get("_auto_boundary", []))
         for poly in boundary_polys:
-            coords = list(poly.exterior.coords)[:-1]
             msp.add_lwpolyline(
-                [(x + dx, y + dy) for x, y in coords],
-                format="xy",
+                [(x + dx, y + dy, b) for x, y, b in clean_ring(poly.exterior.coords, units)],
+                format="xyb",
                 close=True,
                 dxfattribs={"layer": CANONICAL_LAYERS["boundary"]},
             )
@@ -1384,8 +1537,7 @@ def cmd_close(args) -> int:
             if poly is None:
                 print(f"WARNING: floor '{fl['label']}': a {layer} loop collapsed while fitting; kept as drawn", file=sys.stderr)
                 poly = Polygon(pts)
-            coords = list(poly.exterior.coords)[:-1]
-            out.modelspace().add_lwpolyline(coords, format="xy", close=True, dxfattribs={"layer": layer})
+            out.modelspace().add_lwpolyline(clean_ring(poly.exterior.coords, units), format="xyb", close=True, dxfattribs={"layer": layer})
             areas[layer] += poly.area * f * f
             n_loops += 1
             fit["gaps"].extend(r["gaps"])
@@ -1494,7 +1646,7 @@ def cmd_check(args) -> int:
     for role in STRUCTURAL_ROLES:
         n = sum(1 for e in ents(role, {"LWPOLYLINE", "POLYLINE"}) if has_bulge(e))
         if n:
-            rep.warn(f"{role}: {n} polyline(s) with arc bulges — the engine reads vertices only and will chord them; flatten curves (prep does this)")
+            rep.note(f"{role}: {n} polyline(s) with arc bulges; the engine flattens them at {CURVE_FLATTEN_FT} ft chord tolerance")
 
     # --- boundaries / floors ----------------------------------------------
     boundary_entities = list(ents("boundary", GEOMETRY_TYPES))

@@ -40,9 +40,8 @@ matches substrings and will preselect them. `BG-ARCH`, `BG-GRID` are safe.
 ## Geometry rules the engine imposes
 
 - Blocks are not read on structural layers. Explode them. (`prep` does.)
-- Polyline arc bulges are not read; the engine takes vertices only and chords
-  the curve. Flatten curves on `BOUNDARY`, `ADDITIONAL-LOAD`, `WALL`, `COLS`
-  into short straight segments (0.01 ft chord tolerance). Stand-alone `ARC`
+- Polyline arc bulges are read and flattened by the engine at 0.01 ft chord
+  tolerance, so curved slab edges may be drawn as true arcs. Stand-alone `ARC`
   entities on boundary layers are flattened correctly by the engine.
 - Boundary gaps up to 1 ft self-heal; larger gaps leave an open chain and no
   floor.
