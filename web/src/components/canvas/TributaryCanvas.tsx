@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Stage, Layer, Group, Line, Circle, Text } from "react-konva";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
+import { Stage, Layer, Group, Line, Circle, Text, Shape } from "react-konva";
 import type Konva from "konva";
 import {
   buildFloorInstances,
@@ -206,7 +207,121 @@ export default function TributaryCanvas({
       viewMode,
     ],
   );
-  const transform = computeViewTransform(renderBounds, size.width, size.height);
+  const transform = useMemo(
+    () => computeViewTransform(renderBounds, size.width, size.height),
+    [renderBounds, size.width, size.height],
+  );
+
+  // One projection per rendered floor instance, rebuilt only when the view,
+  // the orbit or an alignment origin changes, so memoised floor groups keep
+  // their props between hovers and zooms.
+  const projections = useMemo(() => {
+    const map = new Map<string, Projection>();
+    for (const instance of renderFloors) {
+      const floorBounds = floorBoundsByKey.get(floorSourceKey(instance.floor)) ?? bounds;
+      map.set(
+        instance.instanceId,
+        projectionForFloor(
+          viewMode,
+          floorBounds,
+          instance.floorElevation,
+          isoOrbit,
+          alignmentOriginsByKey.get(floorSourceKey(instance.floor)),
+        ),
+      );
+    }
+    return map;
+  }, [alignmentOriginsByKey, bounds, floorBoundsByKey, isoOrbit, renderFloors, viewMode]);
+
+  // Transfer rings: a column that ends on the floor above lands a red ring on
+  // this instance; the upper point is translated by the alignment-origin delta.
+  const endsHereByInstance = useMemo(() => {
+    const map = new Map<string, [number, number][]>();
+    for (const instance of renderFloors) {
+      const upper = renderFloors.find(
+        (i) => i.stackIndex === instance.stackIndex + 1 && visibleFloors.has(i.sourceFloorId),
+      );
+      if (!upper || !upper.isBottomOfGroup) continue;
+      const lowerOrigin = alignmentOriginsByKey.get(floorSourceKey(instance.floor));
+      const upperOrigin = alignmentOriginsByKey.get(floorSourceKey(upper.floor));
+      if (!lowerOrigin || !upperOrigin) continue;
+      const dxAlign = lowerOrigin[0] - upperOrigin[0];
+      const dyAlign = lowerOrigin[1] - upperOrigin[1];
+      const pts: [number, number][] = [];
+      for (const col of upper.floor.columns) {
+        if (col.ends_here) pts.push([col.point[0] + dxAlign, col.point[1] + dyAlign]);
+      }
+      if (pts.length) map.set(instance.instanceId, pts);
+    }
+    return map;
+  }, [alignmentOriginsByKey, renderFloors, visibleFloors]);
+
+  // Screen-space rings of every tributary region and footprint, per rendered
+  // instance: drawn as one path per floor and used for hit testing in code.
+  const screenGeometry = useMemo(() => {
+    const map = new Map<string, FloorScreenGeometry>();
+    for (const instance of renderFloors) {
+      const projection = projections.get(instance.instanceId);
+      if (!projection) continue;
+      map.set(instance.instanceId, floorScreenGeometry(instance.floor, transform, projection));
+    }
+    return map;
+  }, [projections, renderFloors, transform]);
+
+  const hitColumn = useCallback(
+    (stage: Konva.Stage): { instance: RenderFloorInstance; colIndex: number } | null => {
+      const pointer = stage.getPointerPosition();
+      if (!pointer) return null;
+      const scale = stage.scaleX() || 1;
+      const x = (pointer.x - stage.x()) / scale;
+      const y = (pointer.y - stage.y()) / scale;
+      // Later instances draw on top, so they win the hit.
+      for (let k = renderFloors.length - 1; k >= 0; k -= 1) {
+        const instance = renderFloors[k];
+        if (!visibleFloors.has(instance.sourceFloorId)) continue;
+        const geometry = screenGeometry.get(instance.instanceId);
+        if (!geometry) continue;
+        if (showColumns) {
+          const hit = hitRings(x, y, geometry.footprints);
+          if (hit !== null) return { instance, colIndex: hit };
+        }
+        if (showTributaries) {
+          const hit = hitRings(x, y, geometry.regions);
+          if (hit !== null) return { instance, colIndex: hit };
+        }
+      }
+      return null;
+    },
+    [renderFloors, screenGeometry, showColumns, showTributaries, visibleFloors],
+  );
+  const lastHoverRef = useRef<string | null>(null);
+  const hoverFrameRef = useRef<number | null>(null);
+
+  // Stable callbacks so the memoised floor groups do not re-render when the
+  // parent passes a new function instance.
+  const onSelectColumnRef = useRef(onSelectColumn);
+  const onHoverColumnRef = useRef(onHoverColumn);
+  const onSelectWallRef = useRef(onSelectWall);
+  useEffect(() => {
+    onSelectColumnRef.current = onSelectColumn;
+    onHoverColumnRef.current = onHoverColumn;
+    onSelectWallRef.current = onSelectWall;
+  }, [onSelectColumn, onHoverColumn, onSelectWall]);
+  const selectColumn = useCallback(
+    (floorId: string, displayFloorId: string, colIndex: number) =>
+      onSelectColumnRef.current(floorId, displayFloorId, colIndex),
+    [],
+  );
+  const hoverColumn = useCallback(
+    (floorId: string | null, displayFloorId: string | null, colIndex: number | null) =>
+      onHoverColumnRef.current(floorId, displayFloorId, colIndex),
+    [],
+  );
+  const selectWall = useCallback(
+    (floorId: string, displayFloorId: string, wallIndex: number) =>
+      onSelectWallRef.current(floorId, displayFloorId, wallIndex),
+    [],
+  );
 
   const verticalConnections = useMemo<VerticalConnection[]>(() => {
     if (viewMode !== "iso") return [];
@@ -514,16 +629,33 @@ export default function TributaryCanvas({
       return;
     }
 
-    if (!isPanningRef.current) return;
     const stage = stageRef.current;
     if (!stage) return;
+    if (!isPanningRef.current) {
+      // Hover: one hit test per animation frame, reported only on change.
+      if (hoverFrameRef.current === null) {
+        hoverFrameRef.current = window.requestAnimationFrame(() => {
+          hoverFrameRef.current = null;
+          const hit = hitColumn(stage);
+          const key = hit ? `${hit.instance.instanceId}:${hit.colIndex}` : null;
+          if (key === lastHoverRef.current) return;
+          lastHoverRef.current = key;
+          if (hit) {
+            onHoverColumnRef.current(hit.instance.sourceFloorId, hit.instance.displayFloorId, hit.colIndex);
+          } else {
+            onHoverColumnRef.current(null, null, null);
+          }
+        });
+      }
+      return;
+    }
     const dx = e.evt.clientX - panStartRef.current.x;
     const dy = e.evt.clientY - panStartRef.current.y;
     panStartRef.current = { x: e.evt.clientX, y: e.evt.clientY };
     panDragDistanceRef.current += Math.abs(dx) + Math.abs(dy);
     stage.position({ x: stage.x() + dx, y: stage.y() + dy });
     stage.batchDraw();
-  }, []);
+  }, [hitColumn]);
 
   const handleMouseUp = useCallback(() => {
     stopOrbit();
@@ -533,24 +665,36 @@ export default function TributaryCanvas({
   const handleMouseLeave = useCallback(() => {
     stopOrbit();
     stopPan();
+    if (lastHoverRef.current !== null) {
+      lastHoverRef.current = null;
+      onHoverColumnRef.current(null, null, null);
+    }
   }, [stopOrbit, stopPan]);
 
   const handleCanvasClick = useCallback(
     (e: Konva.KonvaEventObject<MouseEvent>) => {
-      if (!datumEditFloorId || viewMode !== "plan") return;
       if (suppressClickRef.current) return;
-
       const stage = stageRef.current;
       const pointer = stage?.getPointerPosition();
       if (!stage || !pointer) return;
 
-      e.cancelBubble = true;
-      onSetDatum(
-        datumEditFloorId,
-        screenToPlanPoint(pointer, stage, transform),
-      );
+      if (datumEditFloorId) {
+        if (viewMode !== "plan") return;
+        e.cancelBubble = true;
+        onSetDatum(
+          datumEditFloorId,
+          screenToPlanPoint(pointer, stage, transform),
+        );
+        return;
+      }
+      // A wall line handles its own click; anything else is a column hit test.
+      if (e.target !== stage && e.target.getClassName() === "Line") return;
+      const hit = hitColumn(stage);
+      if (hit) {
+        onSelectColumnRef.current(hit.instance.sourceFloorId, hit.instance.displayFloorId, hit.colIndex);
+      }
     },
-    [datumEditFloorId, onSetDatum, transform, viewMode],
+    [datumEditFloorId, hitColumn, onSetDatum, transform, viewMode],
   );
 
   return (
@@ -590,45 +734,279 @@ export default function TributaryCanvas({
       >
         <Layer>
           {renderFloors.map((instance) => {
-            const { floor } = instance;
             if (!visibleFloors.has(instance.sourceFloorId)) return null;
-            const totalCols = floor.columns.length;
-            const floorBounds =
-              floorBoundsByKey.get(floorSourceKey(floor)) ?? bounds;
-            const datumPoint = datumPoints[instance.sourceFloorId];
-            const alignmentOrigin = alignmentOriginsByKey.get(
-              floorSourceKey(floor),
-            );
-            const isDatumTarget = datumEditFloorId === instance.sourceFloorId;
-            const projection = projectionForFloor(
-              viewMode,
-              floorBounds,
-              instance.floorElevation,
-              isoOrbit,
-              alignmentOrigin,
-            );
-            // Inverse scale factor — keeps labels/dots at constant screen size
-            const inv = 1 / stageScale;
-            // Label visibility: hide when too zoomed out to be readable
-            const showLabels = stageScale > 0.4;
-            const showDetail = stageScale > 1.5;
-            const slabComponents = geometryToPolygons(floor.slab_boundary);
-            const mainSlabComponentIndex = largestPolygonIndex(slabComponents);
-
+            const projection = projections.get(instance.instanceId);
+            if (!projection) return null;
+            const own = (sel: { floorId: string; displayFloorId: string } | null) =>
+              sel !== null &&
+              sel.floorId === instance.sourceFloorId &&
+              sel.displayFloorId === instance.displayFloorId;
             return (
-              <Group key={instance.instanceId}>
+              <FloorInstanceGroup
+                key={instance.instanceId}
+                instance={instance}
+                projection={projection}
+                transform={transform}
+                stageScale={stageScale}
+                viewMode={viewMode}
+                showSlabs={showSlabs}
+                showSlabDebug={showSlabDebug}
+                showTributaries={showTributaries}
+                showColumns={showColumns}
+                showBeams={showBeams}
+                showWalls={showWalls}
+                highlightUnlabeled={highlightUnlabeled}
+                datumPoint={datumPoints[instance.sourceFloorId] ?? null}
+                isDatumTarget={datumEditFloorId === instance.sourceFloorId}
+                datumEditing={datumEditFloorId !== null}
+                selectedColIndex={own(selectedColumn) ? selectedColumn!.colIndex : null}
+                hoveredColIndex={own(hoveredColumn) ? hoveredColumn!.colIndex : null}
+                selectedWallIndex={own(selectedWall) ? selectedWall!.wallIndex : null}
+                endsHerePoints={endsHereByInstance.get(instance.instanceId) ?? EMPTY_POINTS}
+                screen={screenGeometry.get(instance.instanceId) ?? EMPTY_SCREEN}
+                suppressClickRef={suppressClickRef}
+                onSelectColumn={selectColumn}
+                onHoverColumn={hoverColumn}
+                onSelectWall={selectWall}
+              />
+            );
+          })}
+          {viewMode === "iso" && (
+            <VerticalConnections
+              verticalConnections={verticalConnections}
+              projections={projections}
+              transform={transform}
+              showWalls={showWalls}
+              showColumns={showColumns}
+            />
+          )}
+        </Layer>
+      </Stage>
+    </div>
+  );
+}
+
+
+const EMPTY_POINTS: [number, number][] = [];
+
+interface FloorInstanceGroupProps {
+  instance: RenderFloorInstance;
+  projection: Projection;
+  transform: Transform;
+  stageScale: number;
+  viewMode: ViewMode;
+  showSlabs: boolean;
+  showSlabDebug: boolean;
+  showTributaries: boolean;
+  showColumns: boolean;
+  showBeams: boolean;
+  showWalls: boolean;
+  highlightUnlabeled: boolean;
+  datumPoint: [number, number] | null;
+  isDatumTarget: boolean;
+  datumEditing: boolean;
+  selectedColIndex: number | null;
+  hoveredColIndex: number | null;
+  selectedWallIndex: number | null;
+  endsHerePoints: [number, number][];
+  screen: FloorScreenGeometry;
+  suppressClickRef: React.MutableRefObject<boolean>;
+  onSelectColumn: (floorId: string, displayFloorId: string, colIndex: number) => void;
+  onHoverColumn: (floorId: string | null, displayFloorId: string | null, colIndex: number | null) => void;
+  onSelectWall: (floorId: string, displayFloorId: string, wallIndex: number) => void;
+}
+
+/** One rendered floor. The heavy polygon set (FloorShapes) ignores the stage
+ *  scale, so zooming re-renders only the markers; hover and selection reach
+ *  the one floor they touch. */
+const FloorInstanceGroup = memo(function FloorInstanceGroup(props: FloorInstanceGroupProps) {
+  const { stageScale: _stageScale, ...shapeProps } = props;
+  void _stageScale;
+  return (
+    <Group>
+      <FloorShapes {...shapeProps} />
+      <FloorMarkers {...props} />
+    </Group>
+  );
+});
+
+type FloorShapesProps = Omit<FloorInstanceGroupProps, "stageScale">;
+
+const FloorShapes = memo(function FloorShapes({
+  instance,
+  projection,
+  transform,
+  screen,
+  showSlabs,
+  showTributaries,
+  showColumns,
+  showBeams,
+  showWalls,
+  datumEditing,
+  selectedColIndex,
+  hoveredColIndex,
+  selectedWallIndex,
+  suppressClickRef,
+  onSelectWall,
+}: FloorShapesProps) {
+  const { floor } = instance;
+  const totalCols = floor.columns.length;
+  return (
+    <Group>
               {/* Slab boundary */}
               {showSlabs && floor.slab_boundary &&
                 geometryToRings(floor.slab_boundary).map((ring, i) => (
                   <Line
+                    strokeScaleEnabled={false}
+                    perfectDrawEnabled={false}
                     key={`boundary-${i}`}
                     points={transformRing(ring, transform, projection)}
                     closed
                     stroke={SLAB_STROKE}
-                    strokeWidth={1.5 * inv}
+                    strokeWidth={1.5}
                     listening={false}
-	                  />
-	                ))}
+                    />
+                  ))}
+
+              {(floor.load_zones?.length ?? 0) > 1 &&
+                floor.load_zones.map((zone) =>
+                  geometryToRings(zone.boundary).map((ring, i) => (
+                    <Line
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
+                      key={`load-zone-${zone.index}-${i}`}
+                      points={transformRing(ring, transform, projection)}
+                      closed
+                      fill={
+                        i === 0
+                          ? regionColor(zone.index, floor.load_zones.length, 0.06)
+                          : undefined
+                      }
+                      stroke={regionStrokeColor(
+                        zone.index,
+                        floor.load_zones.length,
+                      )}
+                      strokeWidth={1}
+                      dash={[8, 5]}
+                      listening={false}
+                    />
+                  )),
+                )}
+
+              {/* Column tributary regions and footprints: one canvas path per
+                  floor (see RegionsShape / FootprintsShape); the stage does the
+                  hit testing in code. */}
+              {showTributaries && (
+                <RegionsShape
+                  regions={screen.regions}
+                  totalCols={totalCols}
+                  selectedColIndex={selectedColIndex}
+                  hoveredColIndex={hoveredColIndex}
+                />
+              )}
+              {showColumns && (
+                <FootprintsShape
+                  footprints={screen.footprints}
+                  selectedColIndex={selectedColIndex}
+                  hoveredColIndex={hoveredColIndex}
+                />
+              )}
+
+              {/* Beam transfer linework: display only; not part of tributary solve yet. */}
+              {showBeams && floor.beams?.map((beam) => {
+                if (!beam.beam_line) return null;
+                return (
+                  <Line
+                    strokeScaleEnabled={false}
+                    perfectDrawEnabled={false}
+                    key={`beamline-${beam.beam_index}`}
+                    points={transformRing(
+                      beam.beam_line.coordinates,
+                      transform,
+                      projection,
+                    )}
+                    stroke="#f59e0b"
+                    strokeWidth={3}
+                    dash={[10, 4]}
+                    lineCap="round"
+                    lineJoin="round"
+                    listening={false}
+                  />
+                );
+              })}
+
+              {/* Wall linework */}
+              {showWalls && floor.walls.map((wall) => {
+                if (!wall.wall_line) return null;
+                const coords = wall.wall_line.coordinates;
+                const isClosed = coords.length >= 4;
+                const isSelected = selectedWallIndex === wall.wall_index;
+                return (
+                  <Line
+                    strokeScaleEnabled={false}
+                    perfectDrawEnabled={false}
+                    key={`wallline-${wall.wall_index}`}
+                    points={transformRing(coords, transform, projection)}
+                    closed={isClosed}
+                    fill={
+                      isClosed
+                        ? "hsla(0, 70%, 45%, 0.35)"
+                        : undefined
+                    }
+                    stroke={
+                      isSelected
+                        ? SELECTED_STROKE
+                        : "#ef4444"
+                    }
+                    strokeWidth={isSelected ? 4 : isClosed ? 1.5 : 3}
+                    lineCap="square"
+                    onClick={() => {
+                      if (datumEditing) return;
+                      if (suppressClickRef.current) return;
+                      onSelectWall(
+                        instance.sourceFloorId,
+                        instance.displayFloorId,
+                        wall.wall_index,
+                      );
+                    }}
+                  />
+                );
+              })}
+
+    </Group>
+  );
+});
+
+const FloorMarkers = memo(function FloorMarkers({
+  instance,
+  projection,
+  transform,
+  stageScale,
+  viewMode,
+  showSlabDebug,
+  showTributaries,
+  showColumns,
+  highlightUnlabeled,
+  datumPoint,
+  isDatumTarget,
+  datumEditing,
+  selectedColIndex,
+  endsHerePoints,
+  suppressClickRef,
+  onSelectColumn,
+  onHoverColumn,
+}: FloorInstanceGroupProps) {
+  const { floor } = instance;
+  // Inverse scale factor keeps labels and dots at constant screen size.
+  const inv = 1 / stageScale;
+  // Label visibility: hide when too zoomed out to be readable
+  const showLabels = stageScale > 0.4;
+  const showDetail = stageScale > 1.5;
+  const slabComponents = geometryToPolygons(floor.slab_boundary);
+  const mainSlabComponentIndex = largestPolygonIndex(slabComponents);
+  return (
+    <Group>
+
 
               {showSlabDebug && slabComponents.length > 0 && (
                 <Group key={`slab-debug-${instance.instanceId}`} listening={false}>
@@ -652,6 +1030,8 @@ export default function TributaryCanvas({
                       >
                         {polygon.map((ring, ringIndex) => (
                           <Line
+                            strokeScaleEnabled={false}
+                            perfectDrawEnabled={false}
                             key={`slab-component-ring-${ringIndex}`}
                             points={transformRing(ring, transform, projection)}
                             closed
@@ -663,8 +1043,8 @@ export default function TributaryCanvas({
                                 : undefined
                             }
                             stroke={isIsland ? "#f59e0b" : "#22d3ee"}
-                            strokeWidth={(isIsland ? 3 : 1.5) * inv}
-                            dash={[10 * inv, 5 * inv]}
+                            strokeWidth={isIsland ? 3 : 1.5}
+                            dash={[10, 5]}
                           />
                         ))}
                         {isIsland && showLabels && (
@@ -684,180 +1064,11 @@ export default function TributaryCanvas({
                 </Group>
               )}
 
-              {(floor.load_zones?.length ?? 0) > 1 &&
-                floor.load_zones.map((zone) =>
-                  geometryToRings(zone.boundary).map((ring, i) => (
-                    <Line
-                      key={`load-zone-${zone.index}-${i}`}
-                      points={transformRing(ring, transform, projection)}
-                      closed
-                      fill={
-                        i === 0
-                          ? regionColor(zone.index, floor.load_zones.length, 0.06)
-                          : undefined
-                      }
-                      stroke={regionStrokeColor(
-                        zone.index,
-                        floor.load_zones.length,
-                      )}
-                      strokeWidth={1 * inv}
-                      dash={[8 * inv, 5 * inv]}
-                      listening={false}
-                    />
-                  )),
-                )}
 
               {/* Wall tributary regions — hidden; wall lines show location,
                   column regions fill the slab. Area data still in exports. */}
 
-              {/* Column tributary regions */}
-              {showTributaries && floor.columns.map((col) => {
-                if (!col.tributary_region) return null;
-                const isSelected =
-                  selectedColumn?.floorId === instance.sourceFloorId &&
-                  selectedColumn?.displayFloorId === instance.displayFloorId &&
-                  selectedColumn?.colIndex === col.index;
-                const isHovered =
-                  hoveredColumn?.floorId === instance.sourceFloorId &&
-                  hoveredColumn?.displayFloorId === instance.displayFloorId &&
-                  hoveredColumn?.colIndex === col.index;
-                const rings = geometryToRings(col.tributary_region);
-                const fill = isSelected
-                  ? SELECTED_FILL
-                  : regionColor(
-                      col.index,
-                      totalCols,
-                      isHovered ? 0.3 : 0.2,
-                    );
-                const stroke = isSelected
-                  ? SELECTED_STROKE
-                  : regionStrokeColor(col.index, totalCols);
 
-                return rings.map((ring, i) => (
-                  <Line
-                    key={`col-${col.index}-${i}`}
-                    points={transformRing(ring, transform, projection)}
-                    closed
-                    fill={i === 0 ? fill : undefined}
-                    stroke={stroke}
-                    strokeWidth={(isSelected ? 1.5 : 0.5) * inv}
-                    onClick={() => {
-                      if (datumEditFloorId) return;
-                      if (suppressClickRef.current) return;
-                      onSelectColumn(
-                        instance.sourceFloorId,
-                        instance.displayFloorId,
-                        col.index,
-                      );
-                    }}
-                    onMouseEnter={() =>
-                      onHoverColumn(
-                        instance.sourceFloorId,
-                        instance.displayFloorId,
-                        col.index,
-                      )
-                    }
-                    onMouseLeave={() => onHoverColumn(null, null, null)}
-                  />
-                ));
-              })}
-
-              {/* Column supports: closed footprints when available, point markers otherwise. */}
-              {showColumns && floor.columns.map((col) => {
-                const isSelected =
-                  selectedColumn?.floorId === instance.sourceFloorId &&
-                  selectedColumn?.displayFloorId === instance.displayFloorId &&
-                  selectedColumn?.colIndex === col.index;
-                const isHovered =
-                  hoveredColumn?.floorId === instance.sourceFloorId &&
-                  hoveredColumn?.displayFloorId === instance.displayFloorId &&
-                  hoveredColumn?.colIndex === col.index;
-                const footprintRings = geometryToRings(col.footprint);
-                if (footprintRings.length > 0) {
-                  return footprintRings.map((ring, i) => (
-                    <Line
-                      key={`footprint-${col.index}-${i}`}
-                      points={transformRing(ring, transform, projection)}
-                      closed
-                      fill={
-                        i === 0
-                          ? isSelected
-                            ? SELECTED_FILL
-                            : isHovered
-                              ? "hsla(217, 91%, 60%, 0.22)"
-                              : "hsla(217, 91%, 60%, 0.14)"
-                          : undefined
-                      }
-                      stroke={
-                        isSelected
-                          ? SELECTED_STROKE
-                          : COLUMN_POINT_COLOR
-                      }
-                      strokeWidth={(isSelected ? 2 : 1.25) * inv}
-                      onClick={() => {
-                        if (datumEditFloorId) return;
-                        if (suppressClickRef.current) return;
-                        onSelectColumn(
-                          instance.sourceFloorId,
-                          instance.displayFloorId,
-                          col.index,
-                        );
-                      }}
-                      onMouseEnter={() =>
-                        onHoverColumn(
-                          instance.sourceFloorId,
-                          instance.displayFloorId,
-                          col.index,
-                        )
-                      }
-                      onMouseLeave={() => onHoverColumn(null, null, null)}
-                    />
-                  ));
-                }
-
-                const [cx, cy] = transformPoint(
-                  col.point[0],
-                  col.point[1],
-                  transform,
-                  projection,
-                );
-                return (
-                  <Circle
-                    key={`pt-${col.index}`}
-                    x={cx}
-                    y={cy}
-                    radius={
-                      (isSelected
-                        ? COLUMN_POINT_RADIUS + 1.5
-                        : COLUMN_POINT_RADIUS) * inv
-                    }
-                    fill={COLUMN_POINT_COLOR}
-                    stroke={
-                      isSelected
-                        ? SELECTED_STROKE
-                        : undefined
-                    }
-                    strokeWidth={isSelected ? 1.5 * inv : 0}
-                    onClick={() => {
-                      if (datumEditFloorId) return;
-                      if (suppressClickRef.current) return;
-                      onSelectColumn(
-                        instance.sourceFloorId,
-                        instance.displayFloorId,
-                        col.index,
-                      );
-                    }}
-                    onMouseEnter={() =>
-                      onHoverColumn(
-                        instance.sourceFloorId,
-                        instance.displayFloorId,
-                        col.index,
-                      )
-                    }
-                    onMouseLeave={() => onHoverColumn(null, null, null)}
-                  />
-                );
-              })}
 
               {/* Alignment datum overlay — cyan crosshair + source chip
                   so the user can visually verify (and later override) the
@@ -888,21 +1099,27 @@ export default function TributaryCanvas({
                 return (
                   <Group key={`datum-${floor.floor_index}`} listening={false}>
                     <Line
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       points={[dx - armLen, dy, dx + armLen, dy]}
                       stroke="#22d3ee"
-                      strokeWidth={1.25 * inv}
+                      strokeWidth={1.25}
                     />
                     <Line
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       points={[dx, dy - armLen, dx, dy + armLen]}
                       stroke="#22d3ee"
-                      strokeWidth={1.25 * inv}
+                      strokeWidth={1.25}
                     />
                     <Circle
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       x={dx}
                       y={dy}
                       radius={ringRadius}
                       stroke="#22d3ee"
-                      strokeWidth={1.25 * inv}
+                      strokeWidth={1.25}
                     />
                     <Circle x={dx} y={dy} radius={dotRadius} fill="#22d3ee" />
                     {viewMode !== "iso" && (
@@ -930,14 +1147,18 @@ export default function TributaryCanvas({
                 return (
                   <Group key={`derr-${i}`} listening={false}>
                     <Line
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       points={[cx - half, cy - half, cx + half, cy + half]}
                       stroke="#facc15"
-                      strokeWidth={1.5 * inv}
+                      strokeWidth={1.5}
                     />
                     <Line
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       points={[cx - half, cy + half, cx + half, cy - half]}
                       stroke="#facc15"
-                      strokeWidth={1.5 * inv}
+                      strokeWidth={1.5}
                     />
                     {viewMode !== "iso" && (
                       <Text
@@ -959,45 +1180,29 @@ export default function TributaryCanvas({
                   transfer (i.e. on THIS instance). Upper-floor column
                   points are translated into this floor's coordinate
                   system via the alignment-origin delta. */}
-              {(() => {
-                const upper = renderFloors.find(
-                  (i) =>
-                    i.stackIndex === instance.stackIndex + 1 &&
-                    visibleFloors.has(i.sourceFloorId),
+              {endsHerePoints.map((pt, i) => {
+                const [cx, cy] = transformPoint(pt[0], pt[1], transform, projection);
+                return (
+                  <Group key={`ends-${i}`} listening={false}>
+                    <Circle
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
+                      x={cx}
+                      y={cy}
+                      radius={(COLUMN_POINT_RADIUS + 4) * inv}
+                      stroke="#ef4444"
+                      strokeWidth={1.75}
+                    />
+                    <Circle
+                      perfectDrawEnabled={false}
+                      x={cx}
+                      y={cy}
+                      radius={(COLUMN_POINT_RADIUS - 0.5) * inv}
+                      fill="#ef4444"
+                    />
+                  </Group>
                 );
-                if (!upper || !upper.isBottomOfGroup) return null;
-                const lowerOrigin = alignmentOriginsByKey.get(floorSourceKey(floor));
-                const upperOrigin = alignmentOriginsByKey.get(floorSourceKey(upper.floor));
-                if (!lowerOrigin || !upperOrigin) return null;
-                const dxAlign = lowerOrigin[0] - upperOrigin[0];
-                const dyAlign = lowerOrigin[1] - upperOrigin[1];
-                return upper.floor.columns.map((col) => {
-                  if (!col.ends_here) return null;
-                  const [cx, cy] = transformPoint(
-                    col.point[0] + dxAlign,
-                    col.point[1] + dyAlign,
-                    transform,
-                    projection,
-                  );
-                  return (
-                    <Group key={`ends-${upper.instanceId}-${col.index}`} listening={false}>
-                      <Circle
-                        x={cx}
-                        y={cy}
-                        radius={(COLUMN_POINT_RADIUS + 4) * inv}
-                        stroke="#ef4444"
-                        strokeWidth={1.75 * inv}
-                      />
-                      <Circle
-                        x={cx}
-                        y={cy}
-                        radius={(COLUMN_POINT_RADIUS - 0.5) * inv}
-                        fill="#ef4444"
-                      />
-                    </Group>
-                  );
-                });
-              })()}
+              })}
 
               {/* Column labels — anchored to column point, offset right.
                   Show labels even on zero-tributary columns (rescued orphans
@@ -1057,6 +1262,8 @@ export default function TributaryCanvas({
                       >
                         {regionRings.map((ring, i) => (
                           <Line
+                            strokeScaleEnabled={false}
+                            perfectDrawEnabled={false}
                             key={`unlabeled-region-${i}`}
                             points={transformRing(ring, transform, projection)}
                             closed
@@ -1066,13 +1273,15 @@ export default function TributaryCanvas({
                                 : undefined
                             }
                             stroke="#facc15"
-                            strokeWidth={2.5 * inv}
-                            dash={[8 * inv, 4 * inv]}
+                            strokeWidth={2.5}
+                            dash={[8, 4]}
                           />
                         ))}
                         {footprintRings.length > 0 ? (
                           footprintRings.map((ring, i) => (
                             <Line
+                              strokeScaleEnabled={false}
+                              perfectDrawEnabled={false}
                               key={`unlabeled-footprint-${i}`}
                               points={transformRing(ring, transform, projection)}
                               closed
@@ -1082,17 +1291,19 @@ export default function TributaryCanvas({
                                   : undefined
                               }
                               stroke="#fef08a"
-                              strokeWidth={3 * inv}
+                              strokeWidth={3}
                             />
                           ))
                         ) : (
                           <Circle
+                            strokeScaleEnabled={false}
+                            perfectDrawEnabled={false}
                             x={px}
                             y={py}
                             radius={(COLUMN_POINT_RADIUS + 2) * inv}
                             fill="#facc15"
                             stroke="#fef08a"
-                            strokeWidth={1.5 * inv}
+                            strokeWidth={1.5}
                           />
                         )}
                         <Text
@@ -1108,65 +1319,7 @@ export default function TributaryCanvas({
                     );
                   })}
 
-              {/* Beam transfer linework: display only; not part of tributary solve yet. */}
-              {showBeams && floor.beams?.map((beam) => {
-                if (!beam.beam_line) return null;
-                return (
-                  <Line
-                    key={`beamline-${beam.beam_index}`}
-                    points={transformRing(
-                      beam.beam_line.coordinates,
-                      transform,
-                      projection,
-                    )}
-                    stroke="#f59e0b"
-                    strokeWidth={3 * inv}
-                    dash={[10 * inv, 4 * inv]}
-                    lineCap="round"
-                    lineJoin="round"
-                    listening={false}
-                  />
-                );
-              })}
 
-              {/* Wall linework */}
-              {showWalls && floor.walls.map((wall) => {
-                if (!wall.wall_line) return null;
-                const coords = wall.wall_line.coordinates;
-                const isClosed = coords.length >= 4;
-                const isSelected =
-                  selectedWall?.floorId === instance.sourceFloorId &&
-                  selectedWall?.displayFloorId === instance.displayFloorId &&
-                  selectedWall?.wallIndex === wall.wall_index;
-                return (
-                  <Line
-                    key={`wallline-${wall.wall_index}`}
-                    points={transformRing(coords, transform, projection)}
-                    closed={isClosed}
-                    fill={
-                      isClosed
-                        ? "hsla(0, 70%, 45%, 0.35)"
-                        : undefined
-                    }
-                    stroke={
-                      isSelected
-                        ? SELECTED_STROKE
-                        : "#ef4444"
-                    }
-                    strokeWidth={(isSelected ? 4 : isClosed ? 1.5 : 3) * inv}
-                    lineCap="square"
-                    onClick={() => {
-                      if (datumEditFloorId) return;
-                      if (suppressClickRef.current) return;
-                      onSelectWall(
-                        instance.sourceFloorId,
-                        instance.displayFloorId,
-                        wall.wall_index,
-                      );
-                    }}
-                  />
-                );
-              })}
 
               {/* Floor ID label — anchored to slab boundary centroid */}
               {floor.slab_boundary && (() => {
@@ -1204,24 +1357,30 @@ export default function TributaryCanvas({
                 return (
                   <Group key={`datum-${instance.instanceId}`} listening={false}>
                     <Line
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       points={[dx - markerSize, dy, dx + markerSize, dy]}
                       stroke="#facc15"
-                      strokeWidth={(isDatumTarget ? 2.25 : 1.75) * inv}
+                      strokeWidth={isDatumTarget ? 2.25 : 1.75}
                       lineCap="round"
                     />
                     <Line
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       points={[dx, dy - markerSize, dx, dy + markerSize]}
                       stroke="#facc15"
-                      strokeWidth={(isDatumTarget ? 2.25 : 1.75) * inv}
+                      strokeWidth={isDatumTarget ? 2.25 : 1.75}
                       lineCap="round"
                     />
                     <Circle
+                      strokeScaleEnabled={false}
+                      perfectDrawEnabled={false}
                       x={dx}
                       y={dy}
                       radius={(isDatumTarget ? 4.5 : 3.5) * inv}
                       fill="hsla(48, 96%, 53%, 0.28)"
                       stroke="#fef08a"
-                      strokeWidth={1.25 * inv}
+                      strokeWidth={1.25}
                     />
                     {showLabels && (
                       <Text
@@ -1236,102 +1395,323 @@ export default function TributaryCanvas({
                   </Group>
                 );
               })()}
-              </Group>
-            );
-          })}
 
-          {viewMode === "iso" &&
-            verticalConnections
-              .filter((conn) =>
-                conn.kind === "wall"
-                  ? showWalls
-                  : showColumns
-              )
-              .map((conn, idx) => {
-              const lowerProjection = projectionForFloor(
-                "iso",
-                floorBoundsByKey.get(floorSourceKey(conn.lowerInstance.floor)) ?? bounds,
-                conn.lowerInstance.floorElevation,
-                isoOrbit,
-                alignmentOriginsByKey.get(floorSourceKey(conn.lowerInstance.floor)),
-              );
-              const upperProjection = projectionForFloor(
-                "iso",
-                floorBoundsByKey.get(floorSourceKey(conn.upperInstance.floor)) ?? bounds,
-                conn.upperInstance.floorElevation,
-                isoOrbit,
-                alignmentOriginsByKey.get(floorSourceKey(conn.upperInstance.floor)),
-              );
-              const inv = 1 / stageScale;
+              {/* Column point markers for columns without a closed footprint. */}
+              {showColumns && floor.columns.map((col) => {
+                const isSelected = selectedColIndex === col.index;
+                if (geometryToRings(col.footprint).length > 0) return null;
 
-              if (conn.kind === "column" || conn.kind === "column-phantom") {
-                const [lx, ly] = transformPoint(
-                  conn.lowerPoint[0],
-                  conn.lowerPoint[1],
+                const [cx, cy] = transformPoint(
+                  col.point[0],
+                  col.point[1],
                   transform,
-                  lowerProjection,
+                  projection,
                 );
-                const [ux, uy] = transformPoint(
-                  conn.upperPoint[0],
-                  conn.upperPoint[1],
-                  transform,
-                  upperProjection,
-                );
-                const phantom = conn.kind === "column-phantom";
                 return (
-                  <Line
-                    key={`vconn-${idx}`}
-                    points={[lx, ly, ux, uy]}
-                    stroke={COLUMN_POINT_COLOR}
-                    strokeWidth={(phantom ? 1.0 : 1.5) * inv}
-                    opacity={phantom ? 0.45 : 0.85}
-                    dash={phantom ? [6 * inv, 4 * inv] : undefined}
-                    lineCap="round"
-                    listening={false}
+                  <Circle
+                    strokeScaleEnabled={false}
+                    perfectDrawEnabled={false}
+                    key={`pt-${col.index}`}
+                    x={cx}
+                    y={cy}
+                    radius={
+                      (isSelected
+                        ? COLUMN_POINT_RADIUS + 1.5
+                        : COLUMN_POINT_RADIUS) * inv
+                    }
+                    fill={COLUMN_POINT_COLOR}
+                    stroke={
+                      isSelected
+                        ? SELECTED_STROKE
+                        : undefined
+                    }
+                    strokeWidth={isSelected ? 1.5 : 0}
+                    onClick={() => {
+                      if (datumEditing) return;
+                      if (suppressClickRef.current) return;
+                      onSelectColumn(
+                        instance.sourceFloorId,
+                        instance.displayFloorId,
+                        col.index,
+                      );
+                    }}
+                    onMouseEnter={() =>
+                      onHoverColumn(
+                        instance.sourceFloorId,
+                        instance.displayFloorId,
+                        col.index,
+                      )
+                    }
+                    onMouseLeave={() => onHoverColumn(null, null, null)}
                   />
                 );
-              }
+              })}
 
-              // Wall: build translucent quad faces between consecutive
-              // matched vertex pairs to give the wall visible thickness
-              // in iso. 20% fill opacity, faint outline.
-              const lowerScreen = conn.lowerCoords.map(
-                (p) => transformPoint(p[0], p[1], transform, lowerProjection),
-              );
-              const upperScreen = conn.upperCoords.map(
-                (p) => transformPoint(p[0], p[1], transform, upperProjection),
-              );
-              return (
-                <Group key={`vconn-${idx}`} listening={false}>
-                  {Array.from({
-                    length: conn.closed
-                      ? lowerScreen.length
-                      : Math.max(0, lowerScreen.length - 1),
-                  }).map((_, i) => {
-                    const nextIndex = (i + 1) % lowerScreen.length;
-                    const l1 = lowerScreen[i];
-                    const l2 = lowerScreen[nextIndex];
-                    const u2 = upperScreen[nextIndex];
-                    const u1 = upperScreen[i];
-                    return (
-                      <Line
-                        key={`wface-${i}`}
-                        points={[l1[0], l1[1], l2[0], l2[1], u2[0], u2[1], u1[0], u1[1]]}
-                        closed
-                        fill="hsla(0, 70%, 45%, 0.2)"
-                        stroke="hsla(0, 70%, 45%, 0.5)"
-                        strokeWidth={0.5 * inv}
-                      />
-                    );
-                  })}
-                </Group>
-              );
-            })}
-        </Layer>
-      </Stage>
-    </div>
+    </Group>
   );
+});
+
+interface VerticalConnectionsProps {
+  verticalConnections: VerticalConnection[];
+  projections: Map<string, Projection>;
+  transform: Transform;
+  showWalls: boolean;
+  showColumns: boolean;
 }
+
+const VerticalConnections = memo(function VerticalConnections({
+  verticalConnections,
+  projections,
+  transform,
+  showWalls,
+  showColumns,
+}: VerticalConnectionsProps) {
+  // Screen-space segments, rebuilt only when the projection changes.
+  const batches = useMemo(() => {
+    const solid: number[] = [];
+    const phantom: number[] = [];
+    const faces: number[][] = [];
+    for (const conn of verticalConnections) {
+      if (conn.kind === "wall" ? !showWalls : !showColumns) continue;
+      const lowerProjection = projections.get(conn.lowerInstance.instanceId);
+      const upperProjection = projections.get(conn.upperInstance.instanceId);
+      if (!lowerProjection || !upperProjection) continue;
+      if (conn.kind === "column" || conn.kind === "column-phantom") {
+        const [lx, ly] = transformPoint(conn.lowerPoint[0], conn.lowerPoint[1], transform, lowerProjection);
+        const [ux, uy] = transformPoint(conn.upperPoint[0], conn.upperPoint[1], transform, upperProjection);
+        (conn.kind === "column-phantom" ? phantom : solid).push(lx, ly, ux, uy);
+        continue;
+      }
+      const lowerScreen = conn.lowerCoords.map((pt) => transformPoint(pt[0], pt[1], transform, lowerProjection));
+      const upperScreen = conn.upperCoords.map((pt) => transformPoint(pt[0], pt[1], transform, upperProjection));
+      const count = conn.closed ? lowerScreen.length : Math.max(0, lowerScreen.length - 1);
+      for (let i = 0; i < count; i += 1) {
+        const n = (i + 1) % lowerScreen.length;
+        faces.push([
+          lowerScreen[i][0], lowerScreen[i][1],
+          lowerScreen[n][0], lowerScreen[n][1],
+          upperScreen[n][0], upperScreen[n][1],
+          upperScreen[i][0], upperScreen[i][1],
+        ]);
+      }
+    }
+    return { solid, phantom, faces };
+  }, [projections, showColumns, showWalls, transform, verticalConnections]);
+
+  return (
+    <Group listening={false}>
+      {batches.faces.length > 0 && (
+        <Shape
+          listening={false}
+          perfectDrawEnabled={false}
+          sceneFunc={(ctx, shape) => {
+            const c = ctx._context;
+            const scale = shape.getStage()?.scaleX() || 1;
+            c.lineWidth = 0.5 / scale;
+            c.fillStyle = "hsla(0, 70%, 45%, 0.2)";
+            c.strokeStyle = "hsla(0, 70%, 45%, 0.5)";
+            for (const q of batches.faces) {
+              c.beginPath();
+              c.moveTo(q[0], q[1]);
+              c.lineTo(q[2], q[3]);
+              c.lineTo(q[4], q[5]);
+              c.lineTo(q[6], q[7]);
+              c.closePath();
+              c.fill();
+              c.stroke();
+            }
+          }}
+        />
+      )}
+      {(batches.solid.length > 0 || batches.phantom.length > 0) && (
+        <Shape
+          listening={false}
+          perfectDrawEnabled={false}
+          sceneFunc={(ctx, shape) => {
+            const c = ctx._context;
+            const scale = shape.getStage()?.scaleX() || 1;
+            c.lineCap = "round";
+            c.strokeStyle = COLUMN_POINT_COLOR;
+            const draw = (segs: number[], width: number, alpha: number, dash: number[]) => {
+              if (!segs.length) return;
+              c.save();
+              c.globalAlpha = alpha;
+              c.lineWidth = width / scale;
+              c.setLineDash(dash.map((d) => d / scale));
+              c.beginPath();
+              for (let i = 0; i < segs.length; i += 4) {
+                c.moveTo(segs[i], segs[i + 1]);
+                c.lineTo(segs[i + 2], segs[i + 3]);
+              }
+              c.stroke();
+              c.restore();
+            };
+            draw(batches.solid, 1.5, 0.85, []);
+            draw(batches.phantom, 1.0, 0.45, [6, 4]);
+          }}
+        />
+      )}
+    </Group>
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Batched drawing: one Konva Shape per floor for the tributary regions and
+// one for the footprints. Thousands of Konva nodes cost more in bookkeeping
+// than the fills themselves; a single path per floor draws in a few ms.
+// ---------------------------------------------------------------------------
+
+interface ScreenRings {
+  index: number;
+  rings: number[][]; // flat [x, y, ...] per ring; ring 0 is the shell
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+interface FloorScreenGeometry {
+  regions: ScreenRings[];
+  footprints: ScreenRings[];
+}
+
+const EMPTY_SCREEN: FloorScreenGeometry = { regions: [], footprints: [] };
+
+function screenRingsOf(
+  index: number,
+  geom: GeoJsonPolygon | GeoJsonMultiPolygon | null,
+  t: Transform,
+  projection: Projection,
+): ScreenRings | null {
+  if (!geom) return null;
+  const rings = geometryToRings(geom).map((ring) => transformRing(ring, t, projection));
+  if (!rings.length || rings[0].length < 6) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const shell = rings[0];
+  for (let i = 0; i < shell.length; i += 2) {
+    if (shell[i] < minX) minX = shell[i];
+    if (shell[i] > maxX) maxX = shell[i];
+    if (shell[i + 1] < minY) minY = shell[i + 1];
+    if (shell[i + 1] > maxY) maxY = shell[i + 1];
+  }
+  return { index, rings, minX, minY, maxX, maxY };
+}
+
+function floorScreenGeometry(floor: FloorData, t: Transform, projection: Projection): FloorScreenGeometry {
+  const regions: ScreenRings[] = [];
+  const footprints: ScreenRings[] = [];
+  for (const col of floor.columns) {
+    const r = screenRingsOf(col.index, col.tributary_region, t, projection);
+    if (r) regions.push(r);
+    const f = screenRingsOf(col.index, col.footprint, t, projection);
+    if (f) footprints.push(f);
+  }
+  return { regions, footprints };
+}
+
+function tracePath(c: CanvasRenderingContext2D, rings: number[][]) {
+  c.beginPath();
+  for (const ring of rings) {
+    c.moveTo(ring[0], ring[1]);
+    for (let i = 2; i < ring.length; i += 2) c.lineTo(ring[i], ring[i + 1]);
+    c.closePath();
+  }
+}
+
+function pointInFlatRing(x: number, y: number, ring: number[]): boolean {
+  let inside = false;
+  const n = ring.length / 2;
+  for (let i = 0, j = n - 1; i < n; j = i, i += 1) {
+    const xi = ring[2 * i], yi = ring[2 * i + 1];
+    const xj = ring[2 * j], yj = ring[2 * j + 1];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function hitRings(x: number, y: number, items: ScreenRings[]): number | null {
+  for (let k = items.length - 1; k >= 0; k -= 1) {
+    const it = items[k];
+    if (x < it.minX || x > it.maxX || y < it.minY || y > it.maxY) continue;
+    if (!pointInFlatRing(x, y, it.rings[0])) continue;
+    let inHole = false;
+    for (let r = 1; r < it.rings.length; r += 1) {
+      if (pointInFlatRing(x, y, it.rings[r])) { inHole = true; break; }
+    }
+    if (!inHole) return it.index;
+  }
+  return null;
+}
+
+const RegionsShape = memo(function RegionsShape({
+  regions,
+  totalCols,
+  selectedColIndex,
+  hoveredColIndex,
+}: {
+  regions: ScreenRings[];
+  totalCols: number;
+  selectedColIndex: number | null;
+  hoveredColIndex: number | null;
+}) {
+  return (
+    <Shape
+      listening={false}
+      perfectDrawEnabled={false}
+      sceneFunc={(ctx, shape) => {
+        const c = ctx._context;
+        const scale = shape.getStage()?.scaleX() || 1;
+        const thin = 0.5 / scale;
+        const thick = 1.5 / scale;
+        for (const r of regions) {
+          const isSelected = r.index === selectedColIndex;
+          const isHovered = r.index === hoveredColIndex;
+          tracePath(c, r.rings);
+          c.fillStyle = isSelected ? SELECTED_FILL : regionColor(r.index, totalCols, isHovered ? 0.3 : 0.2);
+          c.fill("evenodd");
+          c.strokeStyle = isSelected ? SELECTED_STROKE : regionStrokeColor(r.index, totalCols);
+          c.lineWidth = isSelected ? thick : thin;
+          c.stroke();
+        }
+      }}
+    />
+  );
+});
+
+const FootprintsShape = memo(function FootprintsShape({
+  footprints,
+  selectedColIndex,
+  hoveredColIndex,
+}: {
+  footprints: ScreenRings[];
+  selectedColIndex: number | null;
+  hoveredColIndex: number | null;
+}) {
+  return (
+    <Shape
+      listening={false}
+      perfectDrawEnabled={false}
+      sceneFunc={(ctx, shape) => {
+        const c = ctx._context;
+        const scale = shape.getStage()?.scaleX() || 1;
+        for (const f of footprints) {
+          const isSelected = f.index === selectedColIndex;
+          const isHovered = f.index === hoveredColIndex;
+          tracePath(c, f.rings);
+          c.fillStyle = isSelected
+            ? SELECTED_FILL
+            : isHovered
+              ? "hsla(217, 91%, 60%, 0.22)"
+              : "hsla(217, 91%, 60%, 0.14)";
+          c.fill("evenodd");
+          c.strokeStyle = isSelected ? SELECTED_STROKE : COLUMN_POINT_COLOR;
+          c.lineWidth = (isSelected ? 2 : 1.25) / scale;
+          c.stroke();
+        }
+      }}
+    />
+  );
+});
 
 type Transform = ReturnType<typeof computeViewTransform>;
 type Projection = {
