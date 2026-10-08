@@ -35,18 +35,22 @@ through its Python API, so hundreds of calibration cases are scriptable.
 ## How RAM is driven
 
 RAM Concept runs only on the Windows machine with the licence; this repo's
-cloud sessions cannot open it. `scripts/ram_concept_bridge.py` is the script
-for that machine (its Python, with the `ram_concept` package from Help >
-Scripting API):
+cloud sessions cannot open it. `scripts/ram_concept_bridge.py` runs there,
+following agentic-ram's Concept skills (official localhost API, attach by
+port to a `-apiServerWithGui` window, never calc or save an attached
+session, headless process for anything that writes). The Claude Code skill
+`ram-reactions` in this repo walks the steps:
 
-- `export model.cpt --out ram.csv` reads an existing model's column reactions
-  and settings.
-- `build result.json --floor 4-5 --structure structure.json --out ram.csv`
-  builds the same floor from the twin's geometry, meshes, calcs, exports.
-- `--probe` prints each API object's attribute names if a name differs on
-  the installed version.
+- `export` reads column reactions and settings from the open model or a
+  `.cpt` copy.
+- `build` makes the twin's floor as a new model from the published
+  geometry (`/demos/<slug>/result.json` on the live site), meshes, calcs,
+  exports.
+- `--probe` prints attribute names, because the reaction call itself has
+  not been exercised in agentic-ram yet; the first run tells us its name.
 
-Then `scripts/ram_compare.py tasks/1300_manhattan/fem_column_reactions_4-5.csv ram.csv --combo D+L --ram-combo "<layer>"`.
+Then `scripts/ram_compare.py`. When proven, the script moves to agentic-ram
+as `ram-concept/skills/export-ram-concept-column-reactions/`.
 
 ## What we build
 
