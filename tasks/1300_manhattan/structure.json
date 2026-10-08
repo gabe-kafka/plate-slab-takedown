@@ -1,0 +1,17 @@
+{
+  "_comment": "Inputs the DXF does not carry. Yellow-cell assumptions until the engineer or the RAM model says otherwise: 8 in flat plate, 6 ksi (matches prelim_column_sizing), 10'-6\" storeys, residential SDL 20 / LL 40, balconies and amenity roof on ADDITIONAL-LOAD at LL 100. Column far end fixed, both legs, no stiffness modifiers: RAM Concept's elastic defaults. Set these to whatever the RAM model uses before comparing.",
+  "fc_psi": 6000,
+  "slab_thickness_in": 8.0,
+  "zones": {
+    "BOUNDARY": {"sdl_psf": 20.0, "ll_psf": 40.0},
+    "ADDITIONAL-LOAD": {"sdl_psf": 20.0, "ll_psf": 100.0}
+  },
+  "story_height_ft": 10.5,
+  "column_far_end": "fixed",
+  "column_above": true,
+  "column_stiffness_modifier": 1.0,
+  "slab_stiffness_modifier": 1.0,
+  "column_rigid_patch": true,
+  "wall_rotation": "free",
+  "mesh_edge_ft": 1.5
+}
