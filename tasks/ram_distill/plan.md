@@ -131,7 +131,9 @@ x and y, moment from slab into column, kip-ft.
   | 1.5 ft | 0.5% | 1.0% | 5.5% |
 
   So 1.5 ft is fine for calibration; discretisation is not where a 10%
-  miss will come from.
+  miss will come from. Example of the noise the metric has to tolerate:
+  C35, interior, 104 kips, moved from 14.0 to 12.5 kip-ft (10.7%) between
+  two mesher versions while every edge column stayed within 1%.
 - A first version of this run had only half the wall nodes pinned (the
   linework is snapped to 0.001 ft before meshing and the node lookup used a
   tighter tolerance); deflections were 1.1 in and the core columns carried
