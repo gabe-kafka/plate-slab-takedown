@@ -147,6 +147,92 @@ def dkt_stiffness(xy: np.ndarray, D: np.ndarray) -> np.ndarray:
     return K
 
 
+def dkt_stiffness_batch(xy: np.ndarray, D: np.ndarray) -> np.ndarray:
+    """(n,9,9) stiffness for n DKT triangles at once. xy: (n,3,2); D: (3,3) or (n,3,3).
+    Same algebra as dkt_stiffness, vectorised over elements."""
+    x = xy[:, :, 0]
+    y = xy[:, :, 1]
+    n = len(xy)
+    pairs = {4: (1, 2), 5: (2, 0), 6: (0, 1)}
+    P: Dict[int, np.ndarray] = {}
+    q: Dict[int, np.ndarray] = {}
+    t: Dict[int, np.ndarray] = {}
+    r: Dict[int, np.ndarray] = {}
+    for k, (i, j) in pairs.items():
+        xij = x[:, i] - x[:, j]
+        yij = y[:, i] - y[:, j]
+        l2 = xij * xij + yij * yij
+        P[k] = -6.0 * xij / l2
+        q[k] = 3.0 * xij * yij / l2
+        t[k] = -6.0 * yij / l2
+        r[k] = 3.0 * yij * yij / l2
+    x31, x12 = x[:, 2] - x[:, 0], x[:, 0] - x[:, 1]
+    y31, y12 = y[:, 2] - y[:, 0], y[:, 0] - y[:, 1]
+    x21, y21 = x[:, 1] - x[:, 0], y[:, 1] - y[:, 0]
+    twoA = x21 * y31 - x31 * y21
+    if np.any(twoA <= 0):
+        raise ValueError("clockwise or degenerate triangle")
+    P4, P5, P6 = P[4], P[5], P[6]
+    q4, q5, q6 = q[4], q[5], q[6]
+    t4, t5, t6 = t[4], t[5], t[6]
+    r4, r5, r6 = r[4], r[5], r[6]
+    one = np.ones(n)
+    Dm = np.broadcast_to(D, (n, 3, 3))
+    K = np.zeros((n, 9, 9))
+    for xi, eta in ((0.5, 0.0), (0.0, 0.5), (0.5, 0.5)):
+        Hx_xi = np.stack([
+            P6 * (1 - 2 * xi) + (P5 - P6) * eta,
+            q6 * (1 - 2 * xi) - (q5 + q6) * eta,
+            (-4 + 6 * (xi + eta)) * one + r6 * (1 - 2 * xi) - eta * (r5 + r6),
+            -P6 * (1 - 2 * xi) + eta * (P4 + P6),
+            q6 * (1 - 2 * xi) - eta * (q6 - q4),
+            (-2 + 6 * xi) * one + r6 * (1 - 2 * xi) + eta * (r4 - r6),
+            -eta * (P5 + P4),
+            eta * (q4 - q5),
+            -eta * (r5 - r4),
+        ], axis=1)
+        Hy_xi = np.stack([
+            t6 * (1 - 2 * xi) + eta * (t5 - t6),
+            one + r6 * (1 - 2 * xi) - eta * (r5 + r6),
+            -q6 * (1 - 2 * xi) + eta * (q5 + q6),
+            -t6 * (1 - 2 * xi) + eta * (t4 + t6),
+            -one + r6 * (1 - 2 * xi) + eta * (r4 - r6),
+            -q6 * (1 - 2 * xi) - eta * (q4 - q6),
+            -eta * (t4 + t5),
+            eta * (r4 - r5),
+            -eta * (q4 - q5),
+        ], axis=1)
+        Hx_eta = np.stack([
+            -P5 * (1 - 2 * eta) - xi * (P6 - P5),
+            q5 * (1 - 2 * eta) - xi * (q5 + q6),
+            (-4 + 6 * (xi + eta)) * one + r5 * (1 - 2 * eta) - xi * (r5 + r6),
+            xi * (P4 + P6),
+            xi * (q4 - q6),
+            -xi * (r6 - r4),
+            P5 * (1 - 2 * eta) - xi * (P4 + P5),
+            q5 * (1 - 2 * eta) + xi * (q4 - q5),
+            (-2 + 6 * eta) * one + r5 * (1 - 2 * eta) + xi * (r4 - r5),
+        ], axis=1)
+        Hy_eta = np.stack([
+            -t5 * (1 - 2 * eta) - xi * (t6 - t5),
+            one + r5 * (1 - 2 * eta) - xi * (r5 + r6),
+            -q5 * (1 - 2 * eta) + xi * (q5 + q6),
+            xi * (t4 + t6),
+            xi * (r4 - r6),
+            -xi * (q4 - q6),
+            t5 * (1 - 2 * eta) - xi * (t4 + t5),
+            -one + r5 * (1 - 2 * eta) + xi * (r4 - r5),
+            -q5 * (1 - 2 * eta) - xi * (q4 - q5),
+        ], axis=1)
+        B = np.stack([
+            y31[:, None] * Hx_xi + y12[:, None] * Hx_eta,
+            -x31[:, None] * Hy_xi - x12[:, None] * Hy_eta,
+            -x31[:, None] * Hx_xi - x12[:, None] * Hx_eta + y31[:, None] * Hy_xi + y12[:, None] * Hy_eta,
+        ], axis=1) / twoA[:, None, None]
+        K += np.einsum("nki,nkl,nlj->nij", B, Dm, B) * (twoA / 6.0)[:, None, None]
+    return K
+
+
 def plate_D(E_ksf: float, t_ft: float, nu: float = NU) -> np.ndarray:
     d = E_ksf * t_ft ** 3 / (12.0 * (1.0 - nu * nu))
     return d * np.array([[1.0, nu, 0.0], [nu, 1.0, 0.0], [0.0, 0.0, (1.0 - nu) / 2.0]])
@@ -168,19 +254,16 @@ class PlateModel:
         self.loads: Dict[str, np.ndarray] = {}
 
     def assemble(self, D_of_tri) -> None:
-        rows: List[np.ndarray] = []
-        cols: List[np.ndarray] = []
-        vals: List[np.ndarray] = []
-        for e, tri in enumerate(self.tris):
-            Ke = dkt_stiffness(self.nodes[tri], D_of_tri(e))
-            dofs = np.array([[3 * n, 3 * n + 1, 3 * n + 2] for n in tri]).ravel()
-            rr, cc = np.meshgrid(dofs, dofs, indexing="ij")
-            rows.append(rr.ravel())
-            cols.append(cc.ravel())
-            vals.append(Ke.ravel())
-        self.K_struct = sp.coo_matrix(
-            (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(self.ndof, self.ndof)
-        ).tocsr()
+        """D_of_tri: callable e -> (3,3), or a (3,3) array for a uniform plate."""
+        if callable(D_of_tri):
+            D = np.stack([D_of_tri(e) for e in range(len(self.tris))])
+        else:
+            D = np.asarray(D_of_tri)
+        Ke = dkt_stiffness_batch(self.nodes[self.tris], D)
+        dofs = (3 * self.tris[:, :, None] + np.arange(3)[None, None, :]).reshape(len(self.tris), 9)
+        rows = np.repeat(dofs, 9, axis=1).ravel()
+        cols = np.tile(dofs, (1, 9)).ravel()
+        self.K_struct = sp.coo_matrix((Ke.ravel(), (rows, cols)), shape=(self.ndof, self.ndof)).tocsr()
 
     def area_load(self, name: str, q_of_tri) -> None:
         """Uniform pressure q (ksf, positive down) per triangle, lumped to w DOFs."""
@@ -428,13 +511,9 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
     # loads by zone: a triangle belongs to the smallest zone containing its centroid
     cen = nodes[tris].mean(axis=1)
     zone_of_tri = ["BOUNDARY"] * len(tris)
-    zone_sorted = sorted(zones, key=lambda z: z[1].area)
-    for e, (cx, cy) in enumerate(cen):
-        p = Point(cx, cy)
-        for layer, poly in zone_sorted:
-            if poly.contains(p):
-                zone_of_tri[e] = layer
-                break
+    for layer, poly in sorted(zones, key=lambda z: -z[1].area):  # smallest zone wins
+        for e in np.where(shapely.contains_xy(poly, cen[:, 0], cen[:, 1]))[0]:
+            zone_of_tri[e] = layer
     sw = CONCRETE_KCF * t
     zone_loads = st["zones"]
 
@@ -451,8 +530,9 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
         m = centre_idx[i]
         fp = footprints[i]
         if fp is not None:
-            inside = [k for k in range(len(nodes)) if fp.buffer(1e-6).covers(Point(nodes[k]))]
-            model.tie_rigid(inside, m)
+            # linework was snapped to SNAP_FT before meshing, so nodes sit up to SNAP_FT/2 off the footprint
+            inside = np.where(shapely.distance(fp, shapely.points(nodes)) <= 2 * SNAP_FT)[0]
+            model.tie_rigid([int(k) for k in inside], m)
             A, Ixx, Iyy = polygon_second_moments(fp)
         else:
             src = shape(c["footprint"]) if c.get("footprint") else Point(c["point"]).buffer(1.0, 4)
@@ -467,9 +547,7 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
     wall_nodes: List[int] = []
     if walls:
         wall_geom = unary_union(walls)
-        for k in range(len(nodes)):
-            if wall_geom.distance(Point(nodes[k])) < 1e-4:
-                wall_nodes.append(k)
+        wall_nodes = [int(k) for k in np.where(shapely.distance(wall_geom, shapely.points(nodes)) <= 2 * SNAP_FT)[0]]
     wall_nodes = [k for k in wall_nodes if model.master[k] < 0 and k not in centre_idx]
     for k in wall_nodes:
         model.fixed[3 * k] = True
@@ -619,6 +697,18 @@ def verify() -> int:
     ks = m.spring[3 * master + 2] * u[3 * master + 2]
     print(f"  spring My k*theta = {ks:.4f}; reaction My = {My:.4f}; total reaction {R[0::3].sum():.3f} vs load {-tot:.3f}")
     ok &= abs(ks - My) / abs(My) < 1e-6 and abs(R[0::3].sum() + tot) < 1e-6 * tot
+
+    rng = np.random.default_rng(0)
+    pts = rng.random((50, 3, 2)) * 5
+    for k in range(len(pts)):
+        a, b = pts[k, 1] - pts[k, 0], pts[k, 2] - pts[k, 0]
+        if a[0] * b[1] - a[1] * b[0] < 0:
+            pts[k, [1, 2]] = pts[k, [2, 1]]
+    Kb = dkt_stiffness_batch(pts, Dm)
+    Ks = np.stack([dkt_stiffness(p, Dm) for p in pts])
+    dev = np.abs(Kb - Ks).max() / np.abs(Ks).max()
+    print(f"batched vs scalar element stiffness: max relative deviation {dev:.2e}")
+    ok &= dev < 1e-12
 
     print("VERIFY", "PASS" if ok else "FAIL")
     return 0 if ok else 1

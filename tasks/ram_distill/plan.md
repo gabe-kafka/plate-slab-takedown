@@ -114,21 +114,32 @@ formulation is wrong, not the constant.
 
 `tasks/1300_manhattan/structure.json` (8 in plate, 6 ksi, 10.5 ft storeys,
 SDL 20, LL 40 / 100 on balconies, far end fixed, no modifiers). Output in
-`tasks/1300_manhattan/fem_column_reactions_4-5.csv`; sign convention: P
-compression positive, Mx and My right-hand about global x and y, moment from
-slab into column, kip-ft.
+`tasks/1300_manhattan/fem_column_reactions_4-5.csv` at the 1.5 ft mesh;
+sign convention: P compression positive, Mx and My right-hand about global
+x and y, moment from slab into column, kip-ft.
 
-- 62 columns, 21 wall lines, 39k nodes at 1.5 ft; 65 s on one core, 10 s of
-  it element assembly in Python (vectorise before it goes in the app).
-- Applied and reacted load agree to the kip. Median unbalanced moment 52
-  kip-ft at D+L; the largest (270 kip-ft, C3) is an edge column with a
-  balcony cantilever.
-- Mesh 2.5 ft vs 1.5 ft: median 0.9%, p90 4.3%, max 13.8% on the resultant
-  above the 20% floor; one column 28% on axial. So a 1.0 ft run belongs in
-  calibration item 1 before any RAM number is blamed on the element.
+- 62 columns, 21 wall lines (681 pinned nodes), 39k nodes; 5 s per run
+  after vectorising the element assembly and the node lookups.
+- Applied and reacted load agree to the kip. Max elastic deflection 0.23 in
+  at D. Median unbalanced moment 59 kip-ft at D+L, largest 165 kip-ft
+  (C60 and C61, next to the Stair 2 / elevator core), then C36 at 158.
+- Mesh convergence against a 1.0 ft run, columns above the 20% floor:
+
+  | mesh | median | p90 | max |
+  |---|---|---|---|
+  | 2.5 ft | 0.8% | 1.6% | 4.3% |
+  | 1.5 ft | 0.5% | 1.0% | 5.5% |
+
+  So 1.5 ft is fine for calibration; discretisation is not where a 10%
+  miss will come from.
+- A first version of this run had only half the wall nodes pinned (the
+  linework is snapped to 0.001 ft before meshing and the node lookup used a
+  tighter tolerance); deflections were 1.1 in and the core columns carried
+  270 kip-ft. Fixed: tolerances are twice the snap grid for walls and rigid
+  patches. Worth remembering when RAM and we disagree near a core.
 - Column footprints that straddle the slab edge are clipped to the slab and
-  the whole floor's linework is noded and snapped to 0.001 ft before meshing;
-  without that `triangle` hangs on near-coincident vertices.
+  the whole floor's linework is noded and snapped before meshing; without
+  that `triangle` hangs on near-coincident vertices.
 
 ## Out of scope
 

@@ -17,7 +17,7 @@ separately named copy, never kill Concept.exe.
 - `scripts/plate_fem.py`: DKT thin-plate solver on the twin's floor geometry;
   `verify` passes Timoshenko; `run` wrote
   `tasks/1300_manhattan/fem_column_reactions_4-5.csv` (62 columns, D+L
-  median |M| 52 kip-ft) with the assumed inputs in
+  median |M| 59 kip-ft, max 165; 5 s per run) with the assumed inputs in
   `tasks/1300_manhattan/structure.json`.
 - `scripts/ram_concept_bridge.py`: RAM side. `export` (attach or headless
   `--cpt`) and `build` (new model from the twin's geometry, mesh, calc,
