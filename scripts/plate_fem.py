@@ -36,7 +36,11 @@ from shapely.ops import unary_union
 
 CONCRETE_KCF = 0.150
 NU = 0.2
-SNAP_FT = 1e-3  # linework snapped to this grid before meshing
+SNAP_FT = 0.01   # linework snapped to this grid (1/8 in) before meshing
+SNAP_NEAR_FT = 0.05
+MESH_QUALITY = "q30"  # triangle quality flag; set to "" for diagnostics
+MERGE_FT = 0.03      # input vertices closer than this are merged before meshing
+PIN_TOL_FT = 0.05    # a node this close to a wall line or footprint counts as on it  # walls and footprints this close to other linework are snapped onto it
 
 DEFAULT_STRUCTURE = {
     "fc_psi": 6000,
@@ -303,12 +307,26 @@ class PlateModel:
 
     def solve(self) -> Dict[str, np.ndarray]:
         assert self.K_struct is not None
+        self.warnings: List[str] = getattr(self, "warnings", [])
+        # a node no triangle uses has no stiffness: fix it
+        used = np.zeros(self.n, dtype=bool)
+        used[self.tris.ravel()] = True
+        for k in np.where(~used)[0]:
+            self.fixed[3 * k: 3 * k + 3] = True
         T, keep = self._transform()
         K = T.T @ (self.K_struct + sp.diags(self.spring)) @ T
         fixed_red = (T.T @ self.fixed.astype(float)) > 0
         free = np.where(~fixed_red)[0]
         Kff = K[free][:, free].tocsc()
-        lu = spla.splu(Kff)
+        try:
+            lu = spla.splu(Kff)
+        except RuntimeError as exc:
+            # a mechanism (a slab piece hanging off one wall line, a pinch point): stabilise
+            # with springs 1e-9 of the largest diagonal and say so; the result there is meaningless
+            diag = Kff.diagonal().max()
+            Kff = (Kff + sp.identity(Kff.shape[0]) * diag * 1e-9).tocsc()
+            lu = spla.splu(Kff)
+            self.warnings.append(f"singular stiffness ({exc}); stabilised with weak springs, check for an unsupported slab piece")
         out = {}
         for name, f in self.loads.items():
             fr = T.T @ f
@@ -367,6 +385,55 @@ def _clean_polys(geom) -> List[Polygon]:
     return []
 
 
+def _fill_small_holes(geom, min_area_sf: float):
+    polys = []
+    for poly in _clean_polys(geom):
+        keep = [h for h in poly.interiors if Polygon(h).area >= min_area_sf]
+        polys.append(Polygon(poly.exterior, keep))
+    return unary_union(polys)
+
+
+def _merge_close_vertices(verts: List[Tuple[float, float]], segs: set, index: Dict) -> None:
+    """Collapse clusters of vertices closer than MERGE_FT (spikes and slivers that make
+    triangle refine forever). Rewrites verts/segs/index in place."""
+    from scipy.spatial import cKDTree
+    V = np.array(verts)
+    parent = list(range(len(V)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for a, b in cKDTree(V).query_pairs(MERGE_FT):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    roots = [find(a) for a in range(len(V))]
+    if len(set(roots)) == len(V):
+        return
+    clusters: Dict[int, List[int]] = {}
+    for a, r in enumerate(roots):
+        clusters.setdefault(r, []).append(a)
+    new_index: Dict[int, int] = {}
+    new_verts: List[Tuple[float, float]] = []
+    for r, members in clusters.items():
+        new_index[r] = len(new_verts)
+        new_verts.append(tuple(V[members].mean(axis=0).round(6)))
+    remap = {a: new_index[roots[a]] for a in range(len(V))}
+    new_segs = set()
+    for a, b in segs:
+        na, nb = remap[a], remap[b]
+        if na != nb:
+            new_segs.add((min(na, nb), max(na, nb)))
+    verts[:] = new_verts
+    segs.clear()
+    segs.update(new_segs)
+    index.clear()
+    index.update({v: i for i, v in enumerate(new_verts)})
+
+
 def mesh_floor(slab: Polygon, footprints: List[Optional[Polygon]], centres: List[Tuple[float, float]],
                walls: List[LineString], edge_ft: float) -> Tuple[np.ndarray, np.ndarray, List[int]]:
     """Constrained Delaunay mesh of the slab with footprints and walls as segments.
@@ -396,6 +463,26 @@ def mesh_floor(slab: Polygon, footprints: List[Optional[Polygon]], centres: List
                 segs.add((min(a, b), max(a, b)))
 
     slab = slab.buffer(0)
+
+    # footprints: snap onto the slab edge, then union the ones that straddle it into the
+    # slab (the column is there; clipping leaves slivers that break the mesher)
+    patches: List[Optional[Polygon]] = []
+    for fp in footprints:
+        if fp is None or fp.is_empty:
+            patches.append(None)
+            continue
+        fp = shapely.snap(fp.buffer(0).simplify(0.02), slab.boundary, SNAP_NEAR_FT).buffer(0)
+        if fp.is_empty or fp.area < 0.1:
+            patches.append(None)
+            continue
+        if not slab.covers(fp):
+            slab = slab.union(fp).buffer(0)
+        patches.append(fp)
+    patch_union = unary_union([p for p in patches if p is not None]) if any(p is not None for p in patches) else None
+    # the union can leave hair-thin holes along the edge; a hole marker in one of those
+    # ends up outside it after snapping and triangle then eats the whole floor
+    slab = _fill_small_holes(slab, 1.0)
+
     polys = _clean_polys(slab)
     linework = []
     for poly in polys:
@@ -403,24 +490,24 @@ def mesh_floor(slab: Polygon, footprints: List[Optional[Polygon]], centres: List
         for hole in poly.interiors:
             linework.append(LineString(hole.coords))
             holes.append(tuple(Polygon(hole).representative_point().coords[0]))
-
-    patches: List[Optional[Polygon]] = []
-    for fp in footprints:
-        if fp is None or fp.is_empty:
-            patches.append(None)
-            continue
-        clipped = _clean_polys(fp.buffer(0).simplify(0.02).intersection(slab))
-        patches.append(max(clipped, key=lambda g: g.area) if clipped else None)
-    patch_union = unary_union([p for p in patches if p is not None]) if any(p is not None for p in patches) else None
     for fp in patches:
         if fp is not None:
             linework.append(LineString(fp.exterior.coords))
 
+    # walls: clip to the slab, carve out the column patches, snap onto the slab edge,
+    # the patches and the walls already placed (parallel lines a hair apart are slivers)
+    reference = unary_union(linework)
+    edge_band = slab.boundary.buffer(SNAP_NEAR_FT)
     for w in walls:
-        g = w.intersection(slab)
+        # a wall on the slab edge is meshed as the edge; its nodes are pinned by distance later
+        g = w.intersection(slab).difference(edge_band)
         if patch_union is not None:
             g = g.difference(patch_union.buffer(0.05))
-        linework.extend(_clean_lines(g))
+        g = shapely.snap(g, reference, SNAP_NEAR_FT)
+        pieces = _clean_lines(g)
+        if pieces:
+            linework.extend(pieces)
+            reference = unary_union([reference] + pieces)
 
     # node everything together: shared and crossing segments become one set
     # of non-overlapping pieces, which is what triangle needs
@@ -428,13 +515,14 @@ def mesh_floor(slab: Polygon, footprints: List[Optional[Polygon]], centres: List
     noded = unary_union(noded)
     for line in _clean_lines(noded):
         add_path([tuple(c[:2]) for c in line.coords], False)
+    _merge_close_vertices(verts, segs, index)
 
     centre_idx = []
     for c in centres:
         key = (round(round(c[0] / SNAP_FT) * SNAP_FT, 6), round(round(c[1] / SNAP_FT) * SNAP_FT, 6))
         if key in index:
             centre_idx.append(index[key])
-        elif noded.distance(Point(c)) < 2 * SNAP_FT:
+        elif noded.distance(Point(c)) < MERGE_FT:
             centre_idx.append(-1)  # on a segment: resolved to the nearest node after meshing
         else:
             centre_idx.append(vid(c))
@@ -443,7 +531,8 @@ def mesh_floor(slab: Polygon, footprints: List[Optional[Polygon]], centres: List
     if holes:
         A["holes"] = np.array(holes, dtype=float)
     max_area = (edge_ft ** 2) * math.sqrt(3) / 4.0
-    B = tr.triangulate(A, f"pq30a{max_area:.6f}")
+    mesh_floor.last_input = A  # for diagnostics
+    B = tr.triangulate(A, f"p{MESH_QUALITY}a{max_area:.6f}")
     nodes = B["vertices"]
     tris = B["triangles"]
     # triangle keeps input vertices first, in order
@@ -531,7 +620,7 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
         fp = footprints[i]
         if fp is not None:
             # linework was snapped to SNAP_FT before meshing, so nodes sit up to SNAP_FT/2 off the footprint
-            inside = np.where(shapely.distance(fp, shapely.points(nodes)) <= 2 * SNAP_FT)[0]
+            inside = np.where(shapely.distance(fp, shapely.points(nodes)) <= PIN_TOL_FT)[0]
             model.tie_rigid([int(k) for k in inside], m)
             A, Ixx, Iyy = polygon_second_moments(fp)
         else:
@@ -547,7 +636,7 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
     wall_nodes: List[int] = []
     if walls:
         wall_geom = unary_union(walls)
-        wall_nodes = [int(k) for k in np.where(shapely.distance(wall_geom, shapely.points(nodes)) <= 2 * SNAP_FT)[0]]
+        wall_nodes = [int(k) for k in np.where(shapely.distance(wall_geom, shapely.points(nodes)) <= PIN_TOL_FT)[0]]
     wall_nodes = [k for k in wall_nodes if model.master[k] < 0 and k not in centre_idx]
     for k in wall_nodes:
         model.fixed[3 * k] = True
@@ -555,7 +644,42 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
             model.fixed[3 * k + 1] = True
             model.fixed[3 * k + 2] = True
 
+    warnings: List[str] = []
+    # mesh components with no column and no pinned node are unsupported: fix them out
+    from scipy.sparse.csgraph import connected_components
+    ii = np.concatenate([tris[:, 0], tris[:, 1], tris[:, 2]])
+    jj = np.concatenate([tris[:, 1], tris[:, 2], tris[:, 0]])
+    graph = sp.coo_matrix((np.ones(len(ii)), (ii, jj)), shape=(len(nodes), len(nodes)))
+    n_comp, comp = connected_components(graph, directed=False)
+    if n_comp > 1:
+        supported = set(comp[k] for k in centre_idx) | set(comp[k] for k in wall_nodes)
+        for c in range(n_comp):
+            if c in supported:
+                continue
+            members = np.where(comp == c)[0]
+            if len(members) < 3:
+                continue
+            for k in members:
+                model.fixed[3 * k: 3 * k + 3] = True
+            cx, cy = nodes[members].mean(axis=0)
+            warnings.append(f"slab piece at ({cx:.1f}, {cy:.1f}) with {len(members)} nodes has no column or wall: fixed out")
+
+    e1 = nodes[tris[:, 1]] - nodes[tris[:, 0]]
+    e2 = nodes[tris[:, 2]] - nodes[tris[:, 0]]
+    tri_area = float(np.abs(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]).sum() / 2)
+    area_ratio = tri_area / slab.area if slab.area else 0.0
+    if abs(area_ratio - 1.0) > 0.01:
+        raise ValueError(f"mesh covers {area_ratio * 100:.1f}% of the slab area ({tri_area:.0f} of {slab.area:.0f} sf): "
+                         "the slab outline has a gap after snapping; inspect the floor's boundary and footprints")
+
     U = model.solve()
+    warnings += model.warnings
+    for name, u in U.items():
+        d_in = float(-u[0::3].min() * 12.0)
+        if d_in > 2.0:
+            k = int(np.argmin(u[0::3]))
+            warnings.append(f"{name}: {d_in:.1f} in deflection at ({nodes[k, 0]:.1f}, {nodes[k, 1]:.1f}); "
+                            "a slab region there has no column or wall near it (check the boundary and openings)")
     R_case = {name: model.reactions(u, model.loads[name]) for name, u in U.items()}
     results = []
     for i, c in enumerate(cols):
@@ -578,9 +702,11 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     fid = str(fl["floor_id"]).replace("/", "_")
     with (out_dir / f"column_reactions_{fid}.csv").open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(results[0].keys()))
+        fields = list(results[0].keys()) if results else ["label", "x", "y", "trib_sf"]
+        w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         w.writerows(results)
+    worst = {name: nodes[int(np.argmin(u[0::3]))].round(1).tolist() for name, u in U.items()}
     summary = {
         "floor_id": fl["floor_id"], "nodes": int(len(nodes)), "triangles": int(len(tris)),
         "columns": len(cols), "wall_nodes": len(wall_nodes), "structure": st,
@@ -590,6 +716,9 @@ def run_floor(fl: Dict, st: Dict, out_dir: Path) -> List[Dict]:
             for name in U
         },
         "max_deflection_in": {name: round(float(-U[name][0::3].min() * 12.0), 3) for name in U},
+        "max_deflection_at": worst,
+        "mesh_area_ratio": round(area_ratio, 4),
+        "warnings": warnings,
     }
     (out_dir / f"summary_{fid}.json").write_text(json.dumps(summary, indent=2))
     return results, summary
@@ -738,6 +867,8 @@ def main() -> int:
     fl = load_floor(Path(args.result_json), args.floor)
     results, summary = run_floor(fl, st, Path(args.out))
     print(json.dumps({k: v for k, v in summary.items() if k != "structure"}, indent=2))
+    for wmsg in summary["warnings"]:
+        print("WARNING:", wmsg)
     top = sorted(results, key=lambda r: -r["M_D+L"])[:8]
     print("largest unbalanced moments, D+L (kip-ft):")
     for r in top:
