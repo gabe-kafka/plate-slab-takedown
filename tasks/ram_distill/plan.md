@@ -13,6 +13,41 @@ as line supports. Its column reactions (P, Mx, My per load case) are exactly
 the unbalanced moment we want, and the CONNECT edition exposes everything
 through its Python API, so hundreds of calibration cases are scriptable.
 
+## What RAM Concept actually does (from Bentley's help)
+
+- Slab: Robert Cook's 1972 hybrid plate element, triangles and quads, five
+  DOF per node (bending plus in-plane). Ours is a DKT bending-only triangle;
+  for gravity on a flat plate the in-plane DOFs matter only where walls or
+  restrained columns pull the slab sideways, so expect the residual to show
+  up near the cores first.
+- Columns: `fixed_near` and `fixed_far` (moment connection at slab and far
+  end, else pinned), `roller` (zero horizontal shear), `compressible`
+  (axial by Hooke's law, default on) and a bending stiffness factor
+  `i_factor` (help suggests 0.5 at edge columns expected to crack). Our
+  springs map one to one: far end fixed = 4EI/L, pinned = 3EI/L, axial
+  EA/L, modifier = `i_factor`.
+- Walls: same fixities, no stiffness factor, `shear_wall` locks the slab
+  horizontally.
+- Reactions: column reactions per loading or load-combo layer; when a column
+  above and below share a location the report sums them, so the export reads
+  `column_elements_below` only.
+
+## How RAM is driven
+
+RAM Concept runs only on the Windows machine with the licence; this repo's
+cloud sessions cannot open it. `scripts/ram_concept_bridge.py` is the script
+for that machine (its Python, with the `ram_concept` package from Help >
+Scripting API):
+
+- `export model.cpt --out ram.csv` reads an existing model's column reactions
+  and settings.
+- `build result.json --floor 4-5 --structure structure.json --out ram.csv`
+  builds the same floor from the twin's geometry, meshes, calcs, exports.
+- `--probe` prints each API object's attribute names if a name differs on
+  the installed version.
+
+Then `scripts/ram_compare.py tasks/1300_manhattan/fem_column_reactions_4-5.csv ram.csv --combo D+L --ram-combo "<layer>"`.
+
 ## What we build
 
 1. `scripts/plate_fem.py`: thin-plate FE (DKT triangles, Batoz 1980) on the
@@ -60,8 +95,10 @@ formulation is wrong, not the constant.
 - [x] Prototype solver verified against closed-form plates (Timoshenko).
 - [x] Run on 1300 Manhattan floor `4-5` from the precomputed demo geometry.
 - [x] Comparison harness with a defined RAM export CSV schema.
-- [ ] Get or build the RAM Concept model of the typical bar floor; export
-      column reactions; record RAM's settings in `structure.json`.
+- [x] RAM-side script (`scripts/ram_concept_bridge.py`): export reactions
+      from an existing `.cpt`, or build the floor from the twin and calc.
+- [ ] On the RAM machine: run `export` on the engineer's model, or `build`
+      on floor 4-5; copy RAM's settings into `structure.json`.
 - [ ] First comparison; work the calibration list above.
 - [ ] Repeat on the four rectangular demos (regular bays) so the curved bar
       is not the only evidence.
